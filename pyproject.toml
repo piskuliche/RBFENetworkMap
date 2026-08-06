@@ -1,0 +1,82 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rbfe-network-map"
+version = "0.1.0"
+description = "Plan Relative Binding Free Energy perturbation networks from RDKit molecules"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+  {name = "Zeke Piskulich", email = "piskulichz@gmail.com"}
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Topic :: Scientific/Engineering :: Chemistry"
+]
+# Deliberately small. Sibling repos pin `numpy<2` because of parmed / MDAnalysis /
+# deepmd; none of those are dependencies here, and rdkit >= 2023.09 with scipy >= 1.11
+# is numpy-2 clean. A user co-installing with amberstudio inherits that pin from the
+# other side, and both resolutions work.
+dependencies = [
+  "rdkit>=2023.03",
+  "networkx>=3.0",
+  "numpy",
+  "scipy>=1.10",
+]
+
+[project.scripts]
+rbfenet = "rbfenetmap.cli.main:main"
+
+[project.optional-dependencies]
+# The Amber exporter writes guimapper-compatible `atommap_<src>~<dst>.runconfig` YAML.
+amber = ["pyyaml"]
+# GAFF/AMBER-typed mol2 input. Stock RDKit cannot read those (it expects SYBYL types).
+amber-mol2 = ["rdk-amber"]
+kartograf = ["kartograf", "gufe"]
+viz = ["pillow"]
+test = [
+  "pytest",
+  "pytest-cov",
+  "rbfe-network-map[amber,viz]",
+]
+docs = [
+  "numpydoc",
+  "sphinx",
+  "sphinx-copybutton",
+  "sphinx-rtd-theme",
+]
+all = [
+  "rbfe-network-map[amber,amber-mol2,kartograf,viz,test,docs]",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 120
+indent-width = 4
+
+[tool.ruff.format]
+skip-magic-trailing-comma = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+pythonpath = ["src"]
+markers = [
+  "integration: tests that exercise multi-component flows end to end",
+  "optional_dep: tests that require optional third-party dependencies",
+  "slow: tests that are intentionally slower than the core unit suite",
+]
+
+[tool.mypy]
+python_version = "3.10"
+
+[[tool.mypy.overrides]]
+module = ["rdkit.*", "scipy.*", "networkx.*", "kartograf.*", "gufe.*", "rdk_amber.*"]
+ignore_missing_imports = true

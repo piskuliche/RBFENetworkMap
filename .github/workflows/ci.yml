@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          # Non-editable, so the tests exercise what actually ships.
+          pip install ".[test]"
+          # Pinned: an unpinned bump has broken every PR at once before.
+          pip install ruff==0.15.12
+      - name: Lint
+        run: |
+          ruff check src tests examples
+          ruff format --check src tests examples
+      - name: Test
+        # Optional-dependency and slow tests are excluded here and run separately.
+        run: pytest -ra -m "not optional_dep and not slow"
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install ".[docs]"
+      - name: Build docs with warnings as errors
+        run: sphinx-build -W -b html docs/source docs/build/html

@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+docs/build/
+docs/source/_build/
+
+# Regenerated from benzamides.smi by examples/data/make_conformers.py.
+examples/data/benzamides.sdf
+
+# Example and CLI output.
+network.json
+network.html
+amber_out/

@@ -24,12 +24,6 @@ from rbfenetmap.core.options import CorePruningPolicy, MappingOptions
 __all__ = ("MCSSExtended2Mapper", "MCSSExtendedMapper", "MCSSMapper")
 
 
-def _conformer_coords(mol: Chem.Mol, indices: Sequence[int]) -> np.ndarray:
-    """Return the ``(n, 3)`` coordinates of *indices* from the molecule's conformer."""
-    conformer = mol.GetConformer()
-    return np.array([list(conformer.GetAtomPosition(int(i))) for i in indices], dtype=float)
-
-
 class MCSSMapper(AbstractMapper):
     """Map two ligands by their maximum common substructure.
 
@@ -148,6 +142,12 @@ class MCSSMapper(AbstractMapper):
         graph_2 = mol_to_graph(target.mol)
         all_1 = set(range(source.n_atoms))
         all_2 = set(range(target.n_atoms))
+        # Both conformers are fixed for the whole search, so extract each one's full
+        # coordinate matrix once and index it per candidate rather than rebuilding the
+        # arrays atom by atom inside the loop below. `GetPositions` returns the whole
+        # (n, 3) block in one call, and the loop runs up to `max_matches` times.
+        coords_1 = np.asarray(source.mol.GetConformer().GetPositions(), dtype=float)
+        coords_2 = np.asarray(target.mol.GetConformer().GetPositions(), dtype=float)
 
         # What matters is the *relative* orientation of the two embeddings, and the set
         # of achievable relative orientations is the cross product -- varying only one
@@ -171,9 +171,7 @@ class MCSSMapper(AbstractMapper):
                 fragments = len(connected_components_of(graph_1, all_1 - set(core))) + len(
                     connected_components_of(graph_2, all_2 - set(core.values()))
                 )
-                rmsd = core_rmsd(
-                    _conformer_coords(source.mol, list(core)), _conformer_coords(target.mol, list(core.values()))
-                )
+                rmsd = core_rmsd(coords_1[list(core)], coords_2[list(core.values())])
                 key = (
                     (float(fragments), rmsd)
                     if options.match_selection == "fewest_fragments"

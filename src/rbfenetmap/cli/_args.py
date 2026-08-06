@@ -255,7 +255,15 @@ def add_network_arguments(parser: argparse.ArgumentParser) -> None:
         default="pairwise",
         help="'graph' intersects each ligand's core across all its edges (default: %(default)s).",
     )
-    group.add_argument("--jobs", type=int, default=1, metavar="N", help="Worker processes (default: %(default)s).")
+    group.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Worker threads for pair mapping (default: %(default)s). Mapping is partly "
+        "pure Python, so speedup is sublinear and there is nothing to gain from setting "
+        "this above the CPU count.",
+    )
 
 
 def build_mapping_options(args: argparse.Namespace) -> MappingOptions:

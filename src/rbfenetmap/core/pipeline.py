@@ -206,9 +206,13 @@ def evaluate_pairs(
 ) -> list[Transformation]:
     """Map, repair, and score every pair.
 
-    Parallelised over ``network_options.jobs``. RDKit's mapping kernels run in native
-    code, so threads provide useful concurrency without pickling immutable ligand and
-    scorer mappings, which Python process pools cannot serialize.
+    Parallelised over ``network_options.jobs`` *threads*, which keeps the immutable
+    ligand and scorer mappings shared by reference; Python process pools cannot
+    serialize them.
+
+    Threads win only on the native part of the work -- ``FindMCS`` and the substructure
+    search. Core selection, pruning, soft-core repair, and descriptors are pure Python
+    and hold the GIL, so scaling is sublinear and flattens well below the core count.
     """
     work = [
         (ligands[source], ligands[target], mapper, scorer, mapping_options, network_options) for source, target in pairs

@@ -4,8 +4,8 @@ Plan Relative Binding Free Energy perturbation networks from RDKit molecules.
 
 Give it a series of ligands; it returns a scored, tunable network of alchemical
 transformations, each carrying a common-core / soft-core partition that satisfies the
-constraint the package is built around: **a transformation has at most one connected
-soft-core region per side.**
+constraints the package is built around: **a transformation has at most one connected
+soft-core region per side, attached to the common core through exactly one bond.**
 
 ```bash
 pip install -e ".[all]"
@@ -75,6 +75,10 @@ amber masks
   scmask1    :SRC&@C2,F1,F3,F4
   scmask2    :DST&@C1,C2,H12,H13,H14,H15,H16
 ```
+
+Every final soft-core region must also attach to the common core through exactly one
+bond. Bridging regions and ring paths with two or more common-core attachment bonds are
+rejected as ``softcore_multiple_attachments``.
 
 An edge that cannot be repaired within budget is **rejected, not mutated** — and the
 rejection is kept, because it is what explains a sparse or disconnected network:

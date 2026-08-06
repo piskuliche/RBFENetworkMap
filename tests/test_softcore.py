@@ -21,6 +21,7 @@ from rbfenetmap.core.softcore import (
     joint_closure,
     precheck_mapping,
     repair_softcore_connectivity,
+    softcore_attachment_edges,
 )
 
 from .conftest import make_coposed, make_ligand
@@ -67,6 +68,12 @@ class TestFragmentDetection:
 
     def test_regions_are_ordered_largest_first(self):
         assert detect_fragments(_chain(6), {0, 3, 4}) == [{3, 4}, {0}]
+
+    def test_single_attachment_is_allowed(self):
+        assert softcore_attachment_edges(_chain(5), {0, 1}) == [(1, 2)]
+
+    def test_bridging_softcore_has_two_attachments(self):
+        assert softcore_attachment_edges(nx.cycle_graph(6), {0, 1}) == [(0, 5), (1, 2)]
 
 
 class TestJointClosure:
@@ -226,6 +233,27 @@ class TestRepairOnMolecules:
             ligands["a"], ligands["b"], mapping, SoftcorePolicy(max_softcore_atoms=2)
         )
         assert repair.rejection in (RejectionReason.SOFTCORE_TOO_LARGE, RejectionReason.SOFTCORE_FRACTION)
+
+    def test_region_with_two_common_core_bonds_is_rejected(self):
+        ligand = make_ligand("C1CCCCC1", "cyclohexane")
+        softcore_heavy = {0, 1}
+        core = {
+            atom.GetIdx(): atom.GetIdx()
+            for atom in ligand.mol.GetAtoms()
+            if atom.GetIdx() not in softcore_heavy
+            and not (atom.GetAtomicNum() == 1 and atom.GetNeighbors()[0].GetIdx() in softcore_heavy)
+        }
+        mapping = AtomMapping.from_core_pairs(
+            core, n_atoms_1=ligand.n_atoms, n_atoms_2=ligand.n_atoms, method="test"
+        )
+
+        returned, repair = repair_softcore_connectivity(
+            ligand, ligand, mapping, SoftcorePolicy(ring_policy="none")
+        )
+
+        assert returned == mapping
+        assert repair.rejection is RejectionReason.SOFTCORE_MULTIPLE_ATTACHMENTS
+        assert any("2 common-core attachment bond(s)" in line for line in repair.trace)
 
     def test_rejection_returns_the_original_mapping_unchanged(self):
         a = make_ligand("c1ccccc1", "benzene")

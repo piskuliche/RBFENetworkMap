@@ -56,6 +56,7 @@ class RejectionReason(str, Enum):
     """
 
     SOFTCORE_FRAGMENTED = "softcore_fragmented"
+    SOFTCORE_MULTIPLE_ATTACHMENTS = "softcore_multiple_attachments"
     SOFTCORE_TOO_LARGE = "softcore_too_large"
     SOFTCORE_FRACTION = "softcore_fraction_exceeded"
     CORE_TOO_SMALL = "core_too_small"

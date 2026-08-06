@@ -1,7 +1,8 @@
 """Soft-core connectivity repair.
 
-This module enforces the constraint the whole package is organised around: **a
-transformation has at most one connected soft-core region per side**. A mapper is free
+This module enforces the constraints the whole package is organised around: **a
+transformation has at most one connected soft-core region per side, and each region
+attaches to the common core through exactly one bond**. A mapper is free
 to return a correspondence whose unmapped atoms fall into several disconnected pieces --
 that is the normal outcome for, say, a benzene to *para*-xylene transformation, where
 two hydrogens on opposite sides of the ring both disappear. Such a partition cannot be
@@ -50,7 +51,14 @@ from rbfenetmap.core.molgraph import (
 )
 from rbfenetmap.core.options import SoftcorePolicy
 
-__all__ = ("RepairContext", "detect_fragments", "joint_closure", "precheck_mapping", "repair_softcore_connectivity")
+__all__ = (
+    "RepairContext",
+    "detect_fragments",
+    "joint_closure",
+    "precheck_mapping",
+    "repair_softcore_connectivity",
+    "softcore_attachment_edges",
+)
 
 
 def detect_fragments(graph: nx.Graph, softcore: Iterable[int]) -> list[set[int]]:
@@ -60,6 +68,40 @@ def detect_fragments(graph: nx.Graph, softcore: Iterable[int]) -> list[set[int]]
     *at most* one region, and a transformation that only reorders a common core has none.
     """
     return connected_components_of(graph, softcore)
+
+
+def softcore_attachment_edges(graph: nx.Graph, softcore: Iterable[int]) -> list[tuple[int, int]]:
+    """Return bonds crossing from the soft-core to the common core.
+
+    Each tuple is oriented ``(softcore_atom, common_core_atom)``. Counting edges, rather
+    than distinct common-core atoms, expresses the alchemical topology rule directly:
+    one soft-core region must be a singly attached substituent, not a bridge or ring path.
+    """
+    softcore_set = set(softcore)
+    return sorted(
+        (atom, neighbor)
+        for atom in softcore_set
+        for neighbor in graph.neighbors(atom)
+        if neighbor not in softcore_set
+    )
+
+
+def _attachment_check(
+    softcore_1: set[int], softcore_2: set[int], context: RepairContext, trace: list[str]
+) -> RejectionReason | None:
+    """Reject a soft-core region connected to the common core by multiple bonds."""
+    for side, softcore in ((1, softcore_1), (2, softcore_2)):
+        if not softcore:
+            continue
+        graph, _, _, _ = context.side(side)
+        attachments = softcore_attachment_edges(graph, softcore)
+        if len(attachments) != 1:
+            trace.append(
+                f"final side {side}: rejected ({RejectionReason.SOFTCORE_MULTIPLE_ATTACHMENTS.value}); "
+                f"soft-core has {len(attachments)} common-core attachment bond(s) {attachments}"
+            )
+            return RejectionReason.SOFTCORE_MULTIPLE_ATTACHMENTS
+    return None
 
 
 @dataclass
@@ -405,6 +447,9 @@ def repair_softcore_connectivity(
         rejection = _budget_check(softcore_1, softcore_2, context)
         if rejection is not None:
             trace.append(f"final: rejected ({rejection.value})")
+
+    if rejection is None:
+        rejection = _attachment_check(softcore_1, softcore_2, context, trace)
 
     fragments_1 = detect_fragments(context.graph_1, softcore_1)
     fragments_2 = detect_fragments(context.graph_2, softcore_2)

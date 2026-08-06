@@ -8,6 +8,7 @@ than no knob.
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -243,6 +244,12 @@ def add_network_arguments(parser: argparse.ArgumentParser) -> None:
         help="Pairs mapped per adaptive expansion (default: %(default)s).",
     )
     group.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Show pair-mapping progress (default: enabled on an interactive terminal).",
+    )
+    group.add_argument(
         "--consistency",
         choices=("pairwise", "graph"),
         default="pairwise",
@@ -291,6 +298,7 @@ def build_network_options(args: argparse.Namespace) -> NetworkOptions:
         pair_evaluation=args.pair_evaluation,
         adaptive_initial_neighbors=args.adaptive_initial_neighbors,
         adaptive_batch_size=args.adaptive_batch_size,
+        show_progress=sys.stderr.isatty() if args.progress is None else args.progress,
         jobs=args.jobs,
         consistency=args.consistency,
         softcore=softcore,

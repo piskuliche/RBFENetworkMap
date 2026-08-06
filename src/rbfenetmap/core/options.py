@@ -244,6 +244,9 @@ class NetworkOptions:
         Fingerprint-nearest neighbours evaluated per ligand in the first adaptive batch.
     adaptive_batch_size : int
         Maximum number of additional pairs evaluated in each adaptive expansion.
+    show_progress : bool
+        Write pair-evaluation progress to stderr. Disabled by default for library use;
+        the CLI enables it automatically on interactive terminals.
     jobs : int
         Worker processes used for mapping and scoring.
     consistency : {"pairwise", "graph"}
@@ -276,6 +279,7 @@ class NetworkOptions:
     pair_evaluation: PairEvaluation = "eager"
     adaptive_initial_neighbors: int = 3
     adaptive_batch_size: int = 32
+    show_progress: bool = False
     jobs: int = 1
     consistency: Literal["pairwise", "graph"] = "pairwise"
     softcore: SoftcorePolicy = field(default_factory=SoftcorePolicy)

@@ -101,6 +101,7 @@ The feasible candidate graph is disconnected: 2 components.
 | `--selection-objective connectivity_then_cycles` | After the spanning network is built, prioritize putting as many ligands as possible onto at least one cycle before chasing uniform extra degree. |
 | `--max-cycle-size` | During cycle coverage, ignore candidate additions that would only make larger cycles than this. |
 | `--pair-evaluation adaptive` | Fingerprint-rank all pairs and run expensive mappings in batches until connectivity and redundancy targets are met. |
+| `--progress` / `--no-progress` | Show or suppress pair-mapping progress. Interactive CLI runs show it automatically. |
 | `--forced-edge` / `--banned-edge` | Absolute. A forced edge bypasses scoring but not feasibility. |
 | `--max-softcore-atoms` | A *feasibility* knob: it changes the candidate pool, not the selection. |
 | `--charge-change-policy` | `allow` / `penalize` / `reject`. |
@@ -126,7 +127,9 @@ Adaptive evaluation starts from each ligand's three nearest fingerprint neighbou
 maps additional component-bridging pairs until every ligand is connected if possible,
 then expands only while degree or cycle targets remain unmet. Tune its granularity with
 `--adaptive-initial-neighbors` and `--adaptive-batch-size`; keep the default eager mode
-when a complete scored pair matrix is required.
+when a complete scored pair matrix is required. Interactive runs show completed mappings,
+elapsed time, throughput, and estimated remaining time; pass `--progress` to retain this
+display when stderr is redirected to a log.
 
 ## Python API
 

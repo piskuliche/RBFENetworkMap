@@ -46,6 +46,12 @@ not declared impossible until all remaining component-bridging pairs have been t
 The initial breadth and subsequent batch size are controlled by
 ``--adaptive-initial-neighbors`` and ``--adaptive-batch-size``.
 
+Pair mapping progress is displayed automatically when stderr is an interactive terminal.
+Use ``--progress`` to force it in a redirected job log or ``--no-progress`` to suppress
+it. Adaptive progress reports the current batch and uses the complete candidate pool as
+its denominator; ``(stopped early)`` means the requested network was satisfied without
+mapping every pair.
+
 ``--validate-exporter amber`` checks that exporter's format constraints *before* the
 expensive mapping stage, so a problem knowable from the inputs alone does not cost a full
 planning run to discover.

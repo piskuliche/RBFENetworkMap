@@ -12,9 +12,11 @@ several hundred must not abort a run.
 from __future__ import annotations
 
 import logging
+import sys
+import time
 import warnings
-from concurrent.futures import ThreadPoolExecutor
-from typing import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Callable, Mapping, Sequence
 
 import networkx as nx
 
@@ -39,6 +41,67 @@ from rbfenetmap.core.softcore import precheck_mapping, repair_softcore_connectiv
 __all__ = ("build_candidate", "build_network", "evaluate_pairs", "evaluate_pairs_adaptively")
 
 logger = logging.getLogger(__name__)
+
+
+class _PairProgress:
+    """Small dependency-free stderr progress display for expensive pair mappings."""
+
+    def __init__(self, total: int, *, enabled: bool, label: str = "Mapping pairs") -> None:
+        self.total = total
+        self.enabled = enabled
+        self.label = label
+        self.completed = 0
+        self.started = time.monotonic()
+        self.last_rendered = 0.0
+
+    def __enter__(self) -> "_PairProgress":
+        if self.enabled:
+            self._render(force=True)
+        return self
+
+    def update(self, count: int = 1) -> None:
+        """Advance by *count*, throttling terminal redraws."""
+        self.completed += count
+        self._render(force=self.completed >= self.total)
+
+    def set_label(self, label: str) -> None:
+        """Change the phase label and redraw immediately."""
+        self.label = label
+        self._render(force=True)
+
+    def _render(self, *, force: bool = False) -> None:
+        if not self.enabled:
+            return
+        now = time.monotonic()
+        if not force and now - self.last_rendered < 0.1:
+            return
+        elapsed = max(now - self.started, 1e-9)
+        fraction = self.completed / self.total if self.total else 1.0
+        width = 24
+        filled = min(width, int(width * fraction))
+        bar = "#" * filled + "-" * (width - filled)
+        rate = self.completed / elapsed
+        remaining = max(self.total - self.completed, 0)
+        eta = remaining / rate if rate else 0.0
+        sys.stderr.write(
+            f"\r{self.label} [{bar}] {self.completed}/{self.total} "
+            f"({fraction:6.1%}) {elapsed:6.1f}s elapsed {rate:5.2f}/s ETA {eta:6.1f}s"
+        )
+        sys.stderr.flush()
+        self.last_rendered = now
+
+    def close(self) -> None:
+        """Finish the current terminal line, including an early-stop marker."""
+        if not self.enabled:
+            return
+        self._render(force=True)
+        suffix = "" if self.completed >= self.total else " (stopped early)"
+        sys.stderr.write(f"{suffix}\n")
+        sys.stderr.flush()
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        del exc_type, exc_value, traceback
+        self.close()
 
 
 def build_candidate(
@@ -138,6 +201,8 @@ def evaluate_pairs(
     scorer: AbstractScorer,
     mapping_options: MappingOptions,
     network_options: NetworkOptions,
+    *,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> list[Transformation]:
     """Map, repair, and score every pair.
 
@@ -148,10 +213,21 @@ def evaluate_pairs(
     work = [
         (ligands[source], ligands[target], mapper, scorer, mapping_options, network_options) for source, target in pairs
     ]
-    if network_options.jobs > 1 and len(work) > 1:
-        with ThreadPoolExecutor(max_workers=network_options.jobs) as pool:
-            return list(pool.map(_evaluate_one, work))
-    return [build_candidate(*item) for item in work]
+    results: list[Transformation | None] = [None] * len(work)
+    own_progress = _PairProgress(len(work), enabled=network_options.show_progress and progress_callback is None)
+    notify = progress_callback or own_progress.update
+    with own_progress:
+        if network_options.jobs > 1 and len(work) > 1:
+            with ThreadPoolExecutor(max_workers=network_options.jobs) as pool:
+                futures = {pool.submit(_evaluate_one, item): index for index, item in enumerate(work)}
+                for future in as_completed(futures):
+                    results[futures[future]] = future.result()
+                    notify(1)
+        else:
+            for index, item in enumerate(work):
+                results[index] = build_candidate(*item)
+                notify(1)
+    return [result for result in results if result is not None]
 
 
 def _feasible_graph(names: Sequence[str], candidates: Sequence[Transformation]) -> nx.Graph:
@@ -201,62 +277,76 @@ def evaluate_pairs_adaptively(
     remaining = [pair for pair in ranked_pairs if pair not in set(initial)]
     candidates: list[Transformation] = []
 
-    def evaluate(batch: Sequence[tuple[str, str]]) -> None:
-        if not batch:
-            return
-        logger.info(
-            "Adaptive evaluation: mapping %d pair(s), %d previously evaluated, %d remaining",
-            len(batch),
-            len(candidates),
-            len(remaining),
-        )
-        candidates.extend(
-            evaluate_pairs(ligands, batch, mapper, scorer, mapping_options, network_options)
-        )
+    with _PairProgress(len(pairs), enabled=network_options.show_progress) as progress:
+        batch_number = 0
 
-    evaluate(initial)
-    last_network: Network | None = None
-    while True:
-        feasible_graph = _feasible_graph(names, candidates)
-        components = list(nx.connected_components(feasible_graph))
-        membership = {name: index for index, component in enumerate(components) for name in component}
-        bridges = [pair for pair in remaining if membership[pair[0]] != membership[pair[1]]]
+        def evaluate(batch: Sequence[tuple[str, str]]) -> None:
+            nonlocal batch_number
+            if not batch:
+                return
+            batch_number += 1
+            progress.set_label(f"Mapping pairs (batch {batch_number}: {len(batch)})")
+            logger.info(
+                "Adaptive evaluation: mapping %d pair(s), %d previously evaluated, %d remaining",
+                len(batch),
+                len(candidates),
+                len(remaining),
+            )
+            candidates.extend(
+                evaluate_pairs(
+                    ligands,
+                    batch,
+                    mapper,
+                    scorer,
+                    mapping_options,
+                    network_options,
+                    progress_callback=progress.update,
+                )
+            )
 
-        # Connectivity is the first objective even when disconnected output is allowed.
-        # Trying all current cross-component pairs is also what makes a later failure
-        # conclusive rather than an artefact of fingerprint ranking.
-        if len(components) > 1 and bridges:
-            batch = bridges[: network_options.adaptive_batch_size]
-        else:
-            # Intermediate planner warnings are expected while the candidate pool is
-            # still growing; only warnings from the final returned plan are useful.
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                last_network = planner.plan(ligands, candidates, network_options)
+        evaluate(initial)
+        last_network: Network | None = None
+        while True:
+            feasible_graph = _feasible_graph(names, candidates)
+            components = list(nx.connected_components(feasible_graph))
+            membership = {name: index for index, component in enumerate(components) for name in component}
+            bridges = [pair for pair in remaining if membership[pair[0]] != membership[pair[1]]]
 
-            if not last_network.unmet_constraints or not remaining:
-                break
-            if network_options.n_edges is not None and len(last_network.edges) >= network_options.n_edges:
-                break
+            # Connectivity is the first objective even when disconnected output is allowed.
+            # Trying all current cross-component pairs is also what makes a later failure
+            # conclusive rather than an artefact of fingerprint ranking.
+            if len(components) > 1 and bridges:
+                batch = bridges[: network_options.adaptive_batch_size]
+            else:
+                # Intermediate planner warnings are expected while the candidate pool is
+                # still growing; only warnings from the final returned plan are useful.
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    last_network = planner.plan(ligands, candidates, network_options)
 
-            selected = last_network.to_networkx()
-            degrees = dict(selected.degree())
+                if not last_network.unmet_constraints or not remaining:
+                    break
+                if network_options.n_edges is not None and len(last_network.edges) >= network_options.n_edges:
+                    break
 
-            def expansion_rank(pair: tuple[str, str]) -> tuple[int, int, float, tuple[str, str]]:
-                deficient = sum(degrees.get(node, 0) < network_options.edges_per_ligand for node in pair)
-                try:
-                    cycle_size = nx.shortest_path_length(selected, pair[0], pair[1]) + 1
-                except nx.NetworkXNoPath:
-                    cycle_size = len(names) + 1
-                if network_options.max_cycle_size is not None and cycle_size > network_options.max_cycle_size:
-                    cycle_size = len(names) + cycle_size
-                return (-deficient, cycle_size, -similarities[pair], pair)
+                selected = last_network.to_networkx()
+                degrees = dict(selected.degree())
 
-            batch = sorted(remaining, key=expansion_rank)[: network_options.adaptive_batch_size]
+                def expansion_rank(pair: tuple[str, str]) -> tuple[int, int, float, tuple[str, str]]:
+                    deficient = sum(degrees.get(node, 0) < network_options.edges_per_ligand for node in pair)
+                    try:
+                        cycle_size = nx.shortest_path_length(selected, pair[0], pair[1]) + 1
+                    except nx.NetworkXNoPath:
+                        cycle_size = len(names) + 1
+                    if network_options.max_cycle_size is not None and cycle_size > network_options.max_cycle_size:
+                        cycle_size = len(names) + cycle_size
+                    return (-deficient, cycle_size, -similarities[pair], pair)
 
-        evaluate(batch)
-        chosen = set(batch)
-        remaining = [pair for pair in remaining if pair not in chosen]
+                batch = sorted(remaining, key=expansion_rank)[: network_options.adaptive_batch_size]
+
+            evaluate(batch)
+            chosen = set(batch)
+            remaining = [pair for pair in remaining if pair not in chosen]
 
     logger.info(
         "Adaptive evaluation stopped after %d of %d candidate pair(s)", len(candidates), len(pairs)

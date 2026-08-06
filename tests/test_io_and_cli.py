@@ -68,12 +68,16 @@ class TestPipeline:
             build_network([ligand, ligand])
 
     def test_adaptive_evaluation_stops_before_all_pairs(
-        self, benzamides, dummy_mapper, dummy_scorer, monkeypatch
+        self, benzamides, dummy_mapper, dummy_scorer, monkeypatch, capsys
     ):
         from .conftest import make_transformation
 
-        def fake_evaluate(ligands, pairs, mapper, scorer, mapping_options, network_options):
+        def fake_evaluate(
+            ligands, pairs, mapper, scorer, mapping_options, network_options, *, progress_callback=None
+        ):
             del ligands, mapper, scorer, mapping_options, network_options
+            if progress_callback:
+                progress_callback(len(pairs))
             return [make_transformation(*pair) for pair in pairs]
 
         monkeypatch.setattr("rbfenetmap.core.pipeline.evaluate_pairs", fake_evaluate)
@@ -88,11 +92,15 @@ class TestPipeline:
                 adaptive_batch_size=1,
                 edges_per_ligand=1,
                 min_cycle_coverage=0.0,
+                show_progress=True,
             ),
         )
 
         assert nx.is_connected(network.to_networkx())
         assert len(network.candidates) < len(benzamides) * (len(benzamides) - 1) // 2
+        progress = capsys.readouterr().err
+        assert "Mapping pairs" in progress
+        assert "stopped early" in progress
 
     def test_adaptive_evaluation_keeps_trying_bridges_until_connected(
         self, benzamides, dummy_mapper, dummy_scorer, monkeypatch
@@ -102,8 +110,12 @@ class TestPipeline:
         names = sorted(benzamides)
         feasible_chain = {tuple(sorted(pair)) for pair in zip(names, names[1:])}
 
-        def fake_evaluate(ligands, pairs, mapper, scorer, mapping_options, network_options):
+        def fake_evaluate(
+            ligands, pairs, mapper, scorer, mapping_options, network_options, *, progress_callback=None
+        ):
             del ligands, mapper, scorer, mapping_options, network_options
+            if progress_callback:
+                progress_callback(len(pairs))
             return [
                 make_transformation(*pair, feasible=tuple(sorted(pair)) in feasible_chain) for pair in pairs
             ]
@@ -127,7 +139,7 @@ class TestPipeline:
         assert feasible_chain <= {candidate.unordered_key for candidate in network.candidates if candidate.feasible}
 
     def test_parallel_pair_evaluation_handles_immutable_metadata(
-        self, benzamides, dummy_mapper, dummy_scorer
+        self, benzamides, dummy_mapper, dummy_scorer, capsys
     ):
         network = build_network(
             dict(list(benzamides.items())[:3]),
@@ -138,10 +150,15 @@ class TestPipeline:
                 jobs=2,
                 edges_per_ligand=1,
                 min_cycle_coverage=0.0,
+                show_progress=True,
             ),
         )
 
         assert len(network.candidates) == 3
+        progress = capsys.readouterr().err
+        assert "Mapping pairs" in progress
+        assert "3/3" in progress
+        assert "stopped early" not in progress
 
 
 class TestNetworkSerialization:

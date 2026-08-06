@@ -20,6 +20,7 @@ __all__ = (
     "NetworkOptions",
     "PairStrategy",
     "RingPolicy",
+    "SelectionObjective",
     "SoftcorePolicy",
     "normalize_edge_specs",
 )
@@ -28,6 +29,7 @@ RingPolicy = Literal["ring_system", "none"]
 ChargeChangePolicy = Literal["allow", "penalize", "reject"]
 PairStrategy = Literal["all_unordered_pairs", "all_pairs", "star", "linear", "explicit"]
 EdgeDirection = Literal["fewer_softcore_first", "lexicographic", "heavier_second"]
+SelectionObjective = Literal["uniform_redundancy", "connectivity_then_cycles"]
 
 
 def normalize_edge_specs(specs: tuple[str, ...] | list[str] | None) -> frozenset[tuple[str, str]]:
@@ -226,6 +228,13 @@ class NetworkOptions:
         Neighbours retained per ligand by the prefilter.
     prefilter_min_tanimoto : float
         Similarity floor for the prefilter.
+    selection_objective : {"uniform_redundancy", "connectivity_then_cycles"}
+        Whether redundancy first tries to raise degree targets uniformly, or instead
+        focuses on putting as many ligands as possible on at least one cycle after the
+        spanning network has been built.
+    max_cycle_size : int, optional
+        Maximum cycle length allowed when adding redundancy edges to improve cycle
+        coverage. ``None`` permits any cycle size.
     jobs : int
         Worker processes used for mapping and scoring.
     consistency : {"pairwise", "graph"}
@@ -253,6 +262,8 @@ class NetworkOptions:
     prefilter: Literal["none", "fingerprint"] = "none"
     prefilter_k: int = 8
     prefilter_min_tanimoto: float = 0.4
+    selection_objective: SelectionObjective = "uniform_redundancy"
+    max_cycle_size: int | None = None
     jobs: int = 1
     consistency: Literal["pairwise", "graph"] = "pairwise"
     softcore: SoftcorePolicy = field(default_factory=SoftcorePolicy)
@@ -273,6 +284,12 @@ class NetworkOptions:
             raise ValueError("min_cycle_coverage must lie in [0, 1].")
         if self.n_edges is not None and self.n_edges < 1:
             raise ValueError("n_edges must be at least 1 when set.")
+        if self.selection_objective not in ("uniform_redundancy", "connectivity_then_cycles"):
+            raise ValueError(
+                "selection_objective must be 'uniform_redundancy' or 'connectivity_then_cycles'."
+            )
+        if self.max_cycle_size is not None and self.max_cycle_size < 3:
+            raise ValueError("max_cycle_size must be at least 3 when set.")
         if self.jobs < 1:
             raise ValueError("jobs must be at least 1.")
         if self.pair_strategy == "star" and not self.hub:

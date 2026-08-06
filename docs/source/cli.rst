@@ -26,6 +26,17 @@ plan
                 --max-softcore-atoms 12 --show-rejected \
                 --out network.json --export amber html --export-dir ./out
 
+To connect every ligand first, then prioritize getting as many ligands as possible onto
+at least one short cycle:
+
+.. code-block:: bash
+
+   rbfenet plan --ligands ligands.sdf \
+                --edges-per-ligand 1 --min-cycle-coverage 1.0 \
+                --selection-objective connectivity_then_cycles \
+                --max-cycle-size 4 \
+                --out network.json
+
 ``--validate-exporter amber`` checks that exporter's format constraints *before* the
 expensive mapping stage, so a problem knowable from the inputs alone does not cost a full
 planning run to discover.

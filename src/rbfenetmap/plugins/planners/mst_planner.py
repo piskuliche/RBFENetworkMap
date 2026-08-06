@@ -241,7 +241,28 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
         if at_cap() and options.n_edges is not None and len(selected) > options.n_edges:
             unmet.append(f"n_edges={options.n_edges} is below the {len(selected)} edges needed to span the ligands")
 
-        # Degree targets.
+        if options.selection_objective == "connectivity_then_cycles":
+            if options.min_cycle_coverage > 0:
+                selected = self._close_cycles(graph, selected, options, unmet)
+            if options.edges_per_ligand > 1:
+                selected = self._raise_degrees(graph, available, selected, options, unmet)
+        else:
+            selected = self._raise_degrees(graph, available, selected, options, unmet)
+            if options.min_cycle_coverage > 0:
+                selected = self._close_cycles(graph, selected, options, unmet)
+
+        return selected
+
+    def _raise_degrees(
+        self,
+        graph: nx.Graph,
+        available: Sequence[tuple[str, str]],
+        selected: set[tuple[str, str]],
+        options: NetworkOptions,
+        unmet: list[str],
+    ) -> set[tuple[str, str]]:
+        """Greedily add cheap edges until every ligand reaches the target degree."""
+        selected = set(selected)
         degrees = {node: 0 for node in graph.nodes}
         for source, target in selected:
             degrees[source] += 1
@@ -249,12 +270,11 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
 
         target_degree = options.edges_per_ligand
         progress = True
-        while progress and not at_cap():
+        while progress and (options.n_edges is None or len(selected) < options.n_edges):
             progress = False
             deficient = {n for n, d in degrees.items() if d < target_degree}
             if not deficient:
                 break
-            # Prefer an edge that fixes two deficiencies at once over one that fixes one.
             ranked = sorted(
                 (p for p in available if p not in selected and (p[0] in deficient or p[1] in deficient)),
                 key=lambda p: (-((p[0] in deficient) + (p[1] in deficient)), graph.edges[p]["weight"], p),
@@ -275,14 +295,6 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
             )
             unmet.append(message)
             warnings.warn(message, stacklevel=3)
-
-        # Cycle coverage. A node lies on a cycle exactly when it belongs to a biconnected
-        # component of two or more edges. `biconnected_components` alone is the wrong
-        # test: a bridge is a biconnected component of a single edge, so its endpoints
-        # would be counted as covered when they are not.
-        if options.min_cycle_coverage > 0 and not at_cap():
-            selected = self._close_cycles(graph, selected, options, unmet)
-
         return selected
 
     def _close_cycles(
@@ -315,13 +327,40 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
             key=lambda pair: (graph.edges[pair]["weight"], pair),
         )
 
+        def cycle_size_if_added(current: set[tuple[str, str]], pair: tuple[str, str]) -> int | None:
+            """Return the cycle length created by adding *pair*, or ``None`` if none."""
+            subgraph: nx.Graph = nx.Graph()
+            subgraph.add_nodes_from(graph.nodes)
+            subgraph.add_edges_from(current)
+            try:
+                return nx.shortest_path_length(subgraph, pair[0], pair[1]) + 1
+            except nx.NetworkXNoPath:
+                return None
+
+        def rank(pair: tuple[str, str], current_covered: set[str]) -> tuple[float, float, float, tuple[str, str]] | None:
+            """Rank a candidate edge by new cycle coverage, then shortness, then cost."""
+            cycle_size = cycle_size_if_added(selected, pair)
+            if cycle_size is None:
+                return None
+            if options.max_cycle_size is not None and cycle_size > options.max_cycle_size:
+                return None
+            expanded = set(selected)
+            expanded.add(pair)
+            gained = len(covered(expanded) - current_covered)
+            if gained <= 0:
+                return None
+            return (-gained, cycle_size, graph.edges[pair]["weight"], pair)
+
         while len(covered(selected)) < target:
             if options.n_edges is not None and len(selected) >= options.n_edges:
                 break
-            uncovered = set(graph.nodes) - covered(selected)
-            chosen = next(
-                (p for p in available if p not in selected and (p[0] in uncovered or p[1] in uncovered)), None
-            )
+            current_covered = covered(selected)
+            ranked = [
+                item
+                for item in (rank(pair, current_covered) for pair in available if pair not in selected)
+                if item is not None
+            ]
+            chosen = min(ranked)[-1] if ranked else None
             if chosen is None:
                 break
             selected.add(chosen)
@@ -330,7 +369,7 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
         if achieved < options.min_cycle_coverage:
             message = (
                 f"min_cycle_coverage={options.min_cycle_coverage:.2f} unmet; achieved {achieved:.2f}. "
-                "The candidate pool has no further edges that would close a cycle."
+                "The candidate pool has no further edges that would improve cycle coverage."
             )
             unmet.append(message)
             warnings.warn(message, stacklevel=4)

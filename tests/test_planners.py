@@ -24,6 +24,12 @@ def square_ligands(benzamides) -> dict[str, Ligand]:
 
 
 @pytest.fixture
+def five_ligands(benzamides) -> dict[str, Ligand]:
+    """Five ligands for cycle-coverage tests."""
+    return {name: benzamides[name] for name in ("bza_H", "bza_F", "bza_Cl", "bza_Me", "bza_CF3")}
+
+
+@pytest.fixture
 def square_candidates():
     """A 4-cycle with a known cheapest spanning tree.
 
@@ -130,6 +136,33 @@ class TestMSTPlanner:
             network = planner.plan(square_ligands, candidates, NetworkOptions(edges_per_ligand=3))
         assert any("edges_per_ligand" in c for c in network.unmet_constraints)
 
+    def test_connectivity_then_cycles_prefers_short_cycle_coverage(self, five_ligands):
+        candidates = [
+            make_transformation("bza_H", "bza_F", cost=1.0),
+            make_transformation("bza_F", "bza_Cl", cost=1.0),
+            make_transformation("bza_Cl", "bza_Me", cost=1.0),
+            make_transformation("bza_Me", "bza_CF3", cost=1.0),
+            make_transformation("bza_H", "bza_CF3", cost=1.1),
+            make_transformation("bza_H", "bza_Cl", cost=2.0),
+            make_transformation("bza_Cl", "bza_CF3", cost=2.0),
+        ]
+        planner = create_planner("mst")
+        network = planner.plan(
+            five_ligands,
+            candidates,
+            NetworkOptions(
+                edges_per_ligand=2,
+                min_cycle_coverage=0.6,
+                n_edges=5,
+                selection_objective="connectivity_then_cycles",
+                max_cycle_size=3,
+            ),
+        )
+        selected = {e.unordered_key for e in network.edges}
+        assert ("bza_CF3", "bza_H") not in selected, "the short-cycle objective should skip the cheap 5-cycle"
+        assert len(selected & {("bza_Cl", "bza_H"), ("bza_CF3", "bza_Cl")}) == 1
+        assert any("edges_per_ligand" in c for c in network.unmet_constraints)
+
 
 class TestKnobPrecedence:
     def test_forced_and_banned_overlap_rejected_at_construction(self):
@@ -150,6 +183,14 @@ class TestKnobPrecedence:
     def test_star_strategy_requires_a_hub(self):
         with pytest.raises(ValueError, match="requires a hub"):
             NetworkOptions(pair_strategy="star")
+
+    def test_selection_objective_is_validated(self):
+        with pytest.raises(ValueError, match="selection_objective"):
+            NetworkOptions(selection_objective="nope")  # type: ignore[arg-type]
+
+    def test_max_cycle_size_must_allow_a_cycle(self):
+        with pytest.raises(ValueError, match="max_cycle_size"):
+            NetworkOptions(max_cycle_size=2)
 
 
 class TestSimplePlanners:

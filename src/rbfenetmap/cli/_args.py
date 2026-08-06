@@ -205,6 +205,21 @@ def add_network_arguments(parser: argparse.ArgumentParser) -> None:
         "--prefilter-min-tanimoto", type=float, default=0.4, metavar="F", help="Prefilter similarity floor."
     )
     group.add_argument(
+        "--selection-objective",
+        choices=("uniform_redundancy", "connectivity_then_cycles"),
+        default="uniform_redundancy",
+        help=(
+            "How redundancy is added after the spanning network is built (default: %(default)s). "
+            "'connectivity_then_cycles' prioritizes getting ligands onto at least one cycle."
+        ),
+    )
+    group.add_argument(
+        "--max-cycle-size",
+        type=int,
+        metavar="N",
+        help="When improving cycle coverage, prefer cycles of at most N ligands.",
+    )
+    group.add_argument(
         "--consistency",
         choices=("pairwise", "graph"),
         default="pairwise",
@@ -248,6 +263,8 @@ def build_network_options(args: argparse.Namespace) -> NetworkOptions:
         prefilter=args.prefilter,
         prefilter_k=args.prefilter_k,
         prefilter_min_tanimoto=args.prefilter_min_tanimoto,
+        selection_objective=args.selection_objective,
+        max_cycle_size=args.max_cycle_size,
         jobs=args.jobs,
         consistency=args.consistency,
         softcore=softcore,

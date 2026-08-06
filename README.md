@@ -94,6 +94,8 @@ The feasible candidate graph is disconnected: 2 components.
 | `--n-edges` | Cap on total edges. Below `n_ligands - 1` with connectivity required is a **hard error**, never a silent trim. |
 | `--edges-per-ligand` | Target minimum degree. Best-effort; shortfalls are warned and recorded. |
 | `--min-cycle-coverage` | Fraction of ligands on a cycle. Cycles make free energies checkable against themselves. |
+| `--selection-objective connectivity_then_cycles` | After the spanning network is built, prioritize putting as many ligands as possible onto at least one cycle before chasing uniform extra degree. |
+| `--max-cycle-size` | During cycle coverage, ignore candidate additions that would only make larger cycles than this. |
 | `--forced-edge` / `--banned-edge` | Absolute. A forced edge bypasses scoring but not feasibility. |
 | `--max-softcore-atoms` | A *feasibility* knob: it changes the candidate pool, not the selection. |
 | `--charge-change-policy` | `allow` / `penalize` / `reject`. |
@@ -102,6 +104,17 @@ The feasible candidate graph is disconnected: 2 components.
 Selection guarantees a spanning network **iff** the feasible candidate graph is
 connected: the MST is built first, the redundancy pass only ever adds, and conflicting
 budgets are rejected up front rather than by trimming the tree.
+
+For a "connect everyone once, then put as many ligands as possible on at least one short
+cycle" workflow:
+
+```bash
+rbfenet plan --ligands ligands.sdf \
+             --edges-per-ligand 1 --min-cycle-coverage 1.0 \
+             --selection-objective connectivity_then_cycles \
+             --max-cycle-size 4 \
+             --out network.json
+```
 
 ## Python API
 

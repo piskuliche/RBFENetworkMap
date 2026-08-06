@@ -28,10 +28,11 @@ def render_molecule_svg(
     *,
     softcore: Sequence[int] = (),
     core: Sequence[int] = (),
-    width: int = 420,
-    height: int = 340,
+    width: int = 520,
+    height: int = 420,
     title: str = "",
     show_indices: bool = False,
+    show_hydrogens: bool = True,
 ) -> str:
     """Return an SVG string of *mol* with its soft-core and core atoms highlighted.
 
@@ -47,28 +48,44 @@ def render_molecule_svg(
     show_indices : bool, optional
         Label atoms with their indices, which is what makes a depiction usable for
         debugging a mapping rather than merely looking at it.
+    show_hydrogens : bool, optional
+        Draw the explicit hydrogens. On by default because mappings are stated over
+        every atom index including hydrogens, so a hydrogen-suppressed picture cannot
+        show what the mapping actually did.
 
     Returns
     -------
     str
         A standalone ``<svg>`` document.
-    """
-    # Draw a hydrogen-suppressed copy: explicit hydrogens trebles the atom count and
-    # makes the substituent that actually changed impossible to see. The index map keeps
-    # the highlights pointing at the right atoms.
-    drawable = Chem.Mol(mol)
-    keep = [a.GetIdx() for a in drawable.GetAtoms() if a.GetAtomicNum() != 1]
-    remap = {old: new for new, old in enumerate(keep)}
-    drawable = Chem.RWMol(drawable)
-    for index in sorted((a.GetIdx() for a in drawable.GetAtoms() if a.GetAtomicNum() == 1), reverse=True):
-        drawable.RemoveAtom(index)
-    drawable = drawable.GetMol()
-    try:
-        Chem.SanitizeMol(drawable)
-    except (Chem.AtomValenceException, Chem.KekulizeException):  # pragma: no cover - defensive
-        drawable = Chem.Mol(mol)
-        remap = {i: i for i in range(mol.GetNumAtoms())}
 
+    Notes
+    -----
+    The depiction is of the molecule exactly as loaded. Nothing here re-sanitizes or
+    re-perceives it, because doing so *adds atoms that are not in the input*: dropping
+    the explicit hydrogens frees up valence, and the next ``SanitizeMol`` fills it back
+    in with implicit hydrogens. Where the input's bond orders are already wrong -- an
+    all-single-bond mol2, say -- that invention is silent and large, turning carbonyls
+    into alcohols and aromatic rings into saturated ones. Drawing the molecule untouched
+    means a wrong picture is always the input's fault and never this function's.
+    """
+    drawable = Chem.Mol(mol)
+    remap = {index: index for index in range(mol.GetNumAtoms())}
+
+    if not show_hydrogens:
+        # Suppress hydrogens for a compact skeletal view. `RemoveHs` does the valence
+        # bookkeeping itself, so the hydrogens become implicit rather than invented.
+        keep = [a.GetIdx() for a in drawable.GetAtoms() if a.GetAtomicNum() != 1]
+        try:
+            stripped = Chem.RemoveHs(Chem.Mol(drawable), sanitize=False)
+        except Exception:  # pragma: no cover - defensive; keep the faithful drawing
+            stripped = None
+        if stripped is not None and stripped.GetNumAtoms() == len(keep):
+            drawable = stripped
+            remap = {old: new for new, old in enumerate(keep)}
+
+    # Replace the 3D conformer with a 2D layout; a molecule drawn straight from
+    # crystal-like coordinates is unreadable on a flat page.
+    drawable.RemoveAllConformers()
     rdDepictor.Compute2DCoords(drawable)
 
     highlights: list[int] = []
@@ -86,9 +103,16 @@ def render_molecule_svg(
     drawer.drawOptions().addAtomIndices = show_indices
     if title:
         drawer.drawOptions().legendFontSize = 18
-    rdMolDraw2D.PrepareAndDrawMolecule(
-        drawer, drawable, legend=title, highlightAtoms=highlights, highlightAtomColors=colors
-    )
+
+    # `PrepareAndDrawMolecule` would add hydrogens to unspecified stereocentres
+    # (`addChiralHs` defaults on) -- more atoms that are not in the input. Prepare
+    # explicitly with that off, and fall back to an unkekulized drawing rather than
+    # letting a molecule with bad bond orders take the whole report down.
+    try:
+        prepared = rdMolDraw2D.PrepareMolForDrawing(drawable, addChiralHs=False, kekulize=True)
+    except Exception:  # pragma: no cover - defensive
+        prepared = rdMolDraw2D.PrepareMolForDrawing(drawable, addChiralHs=False, kekulize=False)
+    drawer.DrawMolecule(prepared, legend=title, highlightAtoms=highlights, highlightAtomColors=colors)
     drawer.FinishDrawing()
     return drawer.GetDrawingText()
 
@@ -97,9 +121,10 @@ def render_edge_svg(
     edge: Transformation,
     ligands: Mapping[str, Ligand],
     *,
-    width: int = 420,
-    height: int = 340,
+    width: int = 520,
+    height: int = 420,
     show_indices: bool = False,
+    show_hydrogens: bool = True,
 ) -> tuple[str, str]:
     """Return the ``(source_svg, target_svg)`` depictions for one transformation."""
     source = ligands[edge.source]
@@ -113,6 +138,7 @@ def render_edge_svg(
             height=height,
             title=f"{edge.source} (soft-core {edge.mapping.n_softcore_1})",
             show_indices=show_indices,
+            show_hydrogens=show_hydrogens,
         ),
         render_molecule_svg(
             target.mol,
@@ -122,5 +148,6 @@ def render_edge_svg(
             height=height,
             title=f"{edge.target} (soft-core {edge.mapping.n_softcore_2})",
             show_indices=show_indices,
+            show_hydrogens=show_hydrogens,
         ),
     )

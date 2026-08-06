@@ -155,6 +155,11 @@ def network_to_dict(network: Network) -> dict[str, Any]:
                 "min_cycle_coverage": options.min_cycle_coverage,
                 "require_connected": options.require_connected,
                 "edge_direction": options.edge_direction,
+                "selection_objective": options.selection_objective,
+                "max_cycle_size": options.max_cycle_size,
+                "pair_evaluation": options.pair_evaluation,
+                "adaptive_initial_neighbors": options.adaptive_initial_neighbors,
+                "adaptive_batch_size": options.adaptive_batch_size,
                 "softcore": {
                     "ring_policy": options.softcore.ring_policy,
                     "max_softcore_atoms": options.softcore.max_softcore_atoms,
@@ -211,6 +216,11 @@ def load_network(path: Path) -> Network:
             min_cycle_coverage=options_data.get("min_cycle_coverage", 1.0),
             require_connected=options_data.get("require_connected", True),
             edge_direction=options_data.get("edge_direction", "fewer_softcore_first"),
+            selection_objective=options_data.get("selection_objective", "uniform_redundancy"),
+            max_cycle_size=options_data.get("max_cycle_size"),
+            pair_evaluation=options_data.get("pair_evaluation", "eager"),
+            adaptive_initial_neighbors=options_data.get("adaptive_initial_neighbors", 3),
+            adaptive_batch_size=options_data.get("adaptive_batch_size", 32),
             softcore=SoftcorePolicy(**softcore_data) if softcore_data else SoftcorePolicy(),
         )
 

@@ -192,6 +192,12 @@ class TestKnobPrecedence:
         with pytest.raises(ValueError, match="max_cycle_size"):
             NetworkOptions(max_cycle_size=2)
 
+    def test_adaptive_batch_sizes_are_validated(self):
+        with pytest.raises(ValueError, match="adaptive_initial_neighbors"):
+            NetworkOptions(adaptive_initial_neighbors=0)
+        with pytest.raises(ValueError, match="adaptive_batch_size"):
+            NetworkOptions(adaptive_batch_size=0)
+
 
 class TestSimplePlanners:
     def test_complete_selects_every_feasible_edge(self, square_ligands, square_candidates):

@@ -220,6 +220,29 @@ def add_network_arguments(parser: argparse.ArgumentParser) -> None:
         help="When improving cycle coverage, prefer cycles of at most N ligands.",
     )
     group.add_argument(
+        "--pair-evaluation",
+        choices=("eager", "adaptive"),
+        default="eager",
+        help=(
+            "Map all candidates up front, or expand fingerprint-ranked batches until network targets are met "
+            "(default: %(default)s)."
+        ),
+    )
+    group.add_argument(
+        "--adaptive-initial-neighbors",
+        type=int,
+        default=3,
+        metavar="K",
+        help="Nearest neighbours mapped per ligand in the first adaptive batch (default: %(default)s).",
+    )
+    group.add_argument(
+        "--adaptive-batch-size",
+        type=int,
+        default=32,
+        metavar="N",
+        help="Pairs mapped per adaptive expansion (default: %(default)s).",
+    )
+    group.add_argument(
         "--consistency",
         choices=("pairwise", "graph"),
         default="pairwise",
@@ -265,6 +288,9 @@ def build_network_options(args: argparse.Namespace) -> NetworkOptions:
         prefilter_min_tanimoto=args.prefilter_min_tanimoto,
         selection_objective=args.selection_objective,
         max_cycle_size=args.max_cycle_size,
+        pair_evaluation=args.pair_evaluation,
+        adaptive_initial_neighbors=args.adaptive_initial_neighbors,
+        adaptive_batch_size=args.adaptive_batch_size,
         jobs=args.jobs,
         consistency=args.consistency,
         softcore=softcore,

@@ -96,6 +96,7 @@ The feasible candidate graph is disconnected: 2 components.
 | `--min-cycle-coverage` | Fraction of ligands on a cycle. Cycles make free energies checkable against themselves. |
 | `--selection-objective connectivity_then_cycles` | After the spanning network is built, prioritize putting as many ligands as possible onto at least one cycle before chasing uniform extra degree. |
 | `--max-cycle-size` | During cycle coverage, ignore candidate additions that would only make larger cycles than this. |
+| `--pair-evaluation adaptive` | Fingerprint-rank all pairs and run expensive mappings in batches until connectivity and redundancy targets are met. |
 | `--forced-edge` / `--banned-edge` | Absolute. A forced edge bypasses scoring but not feasibility. |
 | `--max-softcore-atoms` | A *feasibility* knob: it changes the candidate pool, not the selection. |
 | `--charge-change-policy` | `allow` / `penalize` / `reject`. |
@@ -112,9 +113,16 @@ cycle" workflow:
 rbfenet plan --ligands ligands.sdf \
              --edges-per-ligand 1 --min-cycle-coverage 1.0 \
              --selection-objective connectivity_then_cycles \
+             --pair-evaluation adaptive \
              --max-cycle-size 4 \
              --out network.json
 ```
+
+Adaptive evaluation starts from each ligand's three nearest fingerprint neighbours,
+maps additional component-bridging pairs until every ligand is connected if possible,
+then expands only while degree or cycle targets remain unmet. Tune its granularity with
+`--adaptive-initial-neighbors` and `--adaptive-batch-size`; keep the default eager mode
+when a complete scored pair matrix is required.
 
 ## Python API
 

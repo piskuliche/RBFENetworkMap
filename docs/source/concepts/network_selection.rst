@@ -11,6 +11,18 @@ guarantee hold.
 
 Because the second stage only adds, connectivity established in the first cannot be lost.
 
+Adaptive pair evaluation
+------------------------
+
+Mapping dominates runtime for an all-pairs pool. With ``pair_evaluation="adaptive"``,
+the pipeline ranks pairs using inexpensive Morgan fingerprint similarity and evaluates
+only an initial nearest-neighbour graph. Failed mappings split the feasible graph into
+components; the next batch is drawn from pairs crossing those components, so work is
+directed toward the primary connectivity objective. After connectivity, expansion
+favours deficient ligands and short cycle closures and stops when the requested targets
+are met. If no connected network exists, every possible component bridge is evaluated
+before failure is reported.
+
 Two redundancy objectives are available:
 
 ``uniform_redundancy``

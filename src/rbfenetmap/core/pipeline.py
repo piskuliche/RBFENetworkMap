@@ -12,8 +12,11 @@ several hundred must not abort a run.
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ProcessPoolExecutor
+import warnings
+from concurrent.futures import ThreadPoolExecutor
 from typing import Mapping, Sequence
+
+import networkx as nx
 
 from rbfenetmap.core.descriptors import compute_descriptors
 from rbfenetmap.core.exceptions import MappingError, RepairError
@@ -30,10 +33,10 @@ from rbfenetmap.core.models import (
     Transformation,
 )
 from rbfenetmap.core.options import MappingOptions, NetworkOptions
-from rbfenetmap.core.pairs import generate_candidate_pairs
+from rbfenetmap.core.pairs import fingerprint_pair_similarities, generate_candidate_pairs
 from rbfenetmap.core.softcore import precheck_mapping, repair_softcore_connectivity
 
-__all__ = ("build_candidate", "build_network", "evaluate_pairs")
+__all__ = ("build_candidate", "build_network", "evaluate_pairs", "evaluate_pairs_adaptively")
 
 logger = logging.getLogger(__name__)
 
@@ -123,8 +126,8 @@ def build_candidate(
     return Transformation(source=source.name, target=target.name, mapping=repaired, repair=repair, score=score)
 
 
-def _evaluate_one(args: tuple) -> Transformation:  # pragma: no cover - process-pool entry
-    """Top-level worker so the pair evaluation can be pickled for a process pool."""
+def _evaluate_one(args: tuple) -> Transformation:
+    """Evaluate one prepared pair payload."""
     return build_candidate(*args)
 
 
@@ -138,16 +141,130 @@ def evaluate_pairs(
 ) -> list[Transformation]:
     """Map, repair, and score every pair.
 
-    Parallelised over ``network_options.jobs``. Pairs are independent, so this is a plain
-    fan-out with no shared state.
+    Parallelised over ``network_options.jobs``. RDKit's mapping kernels run in native
+    code, so threads provide useful concurrency without pickling immutable ligand and
+    scorer mappings, which Python process pools cannot serialize.
     """
     work = [
         (ligands[source], ligands[target], mapper, scorer, mapping_options, network_options) for source, target in pairs
     ]
     if network_options.jobs > 1 and len(work) > 1:
-        with ProcessPoolExecutor(max_workers=network_options.jobs) as pool:
+        with ThreadPoolExecutor(max_workers=network_options.jobs) as pool:
             return list(pool.map(_evaluate_one, work))
     return [build_candidate(*item) for item in work]
+
+
+def _feasible_graph(names: Sequence[str], candidates: Sequence[Transformation]) -> nx.Graph:
+    """Build the undirected graph of candidates that passed feasibility checks."""
+    graph: nx.Graph = nx.Graph()
+    graph.add_nodes_from(names)
+    graph.add_edges_from(candidate.unordered_key for candidate in candidates if candidate.feasible)
+    return graph
+
+
+def _initial_adaptive_pairs(
+    names: Sequence[str],
+    ranked_pairs: Sequence[tuple[str, str]],
+    forced_pairs: frozenset[tuple[str, str]],
+    neighbors: int,
+) -> list[tuple[str, str]]:
+    """Seed adaptive evaluation with forced edges and each ligand's nearest neighbours."""
+    chosen: set[tuple[str, str]] = set(forced_pairs)
+    for name in names:
+        incident = [pair for pair in ranked_pairs if name in pair]
+        chosen.update(incident[:neighbors])
+    return [pair for pair in ranked_pairs if pair in chosen]
+
+
+def evaluate_pairs_adaptively(
+    ligands: Mapping[str, Ligand],
+    pairs: Sequence[tuple[str, str]],
+    mapper: AbstractMapper,
+    scorer: AbstractScorer,
+    planner: AbstractNetworkPlanner,
+    mapping_options: MappingOptions,
+    network_options: NetworkOptions,
+) -> Network:
+    """Evaluate promising pairs in batches until the network targets are met.
+
+    Connectivity expansion always prioritizes unevaluated pairs crossing the current
+    feasible components. If connectivity remains impossible, every possible bridge is
+    eventually evaluated before the planner reports failure. Once connected, additional
+    batches favour deficient ligands and edges that form short cycles.
+    """
+    names = list(ligands)
+    similarities = fingerprint_pair_similarities(ligands, pairs)
+    ranked_pairs = sorted(pairs, key=lambda pair: (-similarities[pair], pair))
+    initial = _initial_adaptive_pairs(
+        names, ranked_pairs, network_options.forced_pairs, network_options.adaptive_initial_neighbors
+    )
+    remaining = [pair for pair in ranked_pairs if pair not in set(initial)]
+    candidates: list[Transformation] = []
+
+    def evaluate(batch: Sequence[tuple[str, str]]) -> None:
+        if not batch:
+            return
+        logger.info(
+            "Adaptive evaluation: mapping %d pair(s), %d previously evaluated, %d remaining",
+            len(batch),
+            len(candidates),
+            len(remaining),
+        )
+        candidates.extend(
+            evaluate_pairs(ligands, batch, mapper, scorer, mapping_options, network_options)
+        )
+
+    evaluate(initial)
+    last_network: Network | None = None
+    while True:
+        feasible_graph = _feasible_graph(names, candidates)
+        components = list(nx.connected_components(feasible_graph))
+        membership = {name: index for index, component in enumerate(components) for name in component}
+        bridges = [pair for pair in remaining if membership[pair[0]] != membership[pair[1]]]
+
+        # Connectivity is the first objective even when disconnected output is allowed.
+        # Trying all current cross-component pairs is also what makes a later failure
+        # conclusive rather than an artefact of fingerprint ranking.
+        if len(components) > 1 and bridges:
+            batch = bridges[: network_options.adaptive_batch_size]
+        else:
+            # Intermediate planner warnings are expected while the candidate pool is
+            # still growing; only warnings from the final returned plan are useful.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                last_network = planner.plan(ligands, candidates, network_options)
+
+            if not last_network.unmet_constraints or not remaining:
+                break
+            if network_options.n_edges is not None and len(last_network.edges) >= network_options.n_edges:
+                break
+
+            selected = last_network.to_networkx()
+            degrees = dict(selected.degree())
+
+            def expansion_rank(pair: tuple[str, str]) -> tuple[int, int, float, tuple[str, str]]:
+                deficient = sum(degrees.get(node, 0) < network_options.edges_per_ligand for node in pair)
+                try:
+                    cycle_size = nx.shortest_path_length(selected, pair[0], pair[1]) + 1
+                except nx.NetworkXNoPath:
+                    cycle_size = len(names) + 1
+                if network_options.max_cycle_size is not None and cycle_size > network_options.max_cycle_size:
+                    cycle_size = len(names) + cycle_size
+                return (-deficient, cycle_size, -similarities[pair], pair)
+
+            batch = sorted(remaining, key=expansion_rank)[: network_options.adaptive_batch_size]
+
+        evaluate(batch)
+        chosen = set(batch)
+        remaining = [pair for pair in remaining if pair not in chosen]
+
+    logger.info(
+        "Adaptive evaluation stopped after %d of %d candidate pair(s)", len(candidates), len(pairs)
+    )
+    # Re-plan outside warning suppression so any genuinely unmet best-effort target is
+    # visible exactly once. For a required but impossible connection this raises with
+    # diagnostics after all component-bridging possibilities have been attempted.
+    return planner.plan(ligands, candidates, network_options)
 
 
 def build_network(
@@ -222,6 +339,13 @@ def build_network(
             restored,
         )
     logger.info("Evaluating %d candidate pair(s) with mapper %r", len(pairs), mapper_obj.name)
+
+    if network_options.pair_evaluation == "adaptive" and planner_obj.name == "mst":
+        return evaluate_pairs_adaptively(
+            ligands, pairs, mapper_obj, scorer_obj, planner_obj, mapping_options, network_options
+        )
+    if network_options.pair_evaluation == "adaptive":
+        logger.info("Planner %r requires eager candidate evaluation; mapping the full pool", planner_obj.name)
 
     candidates = evaluate_pairs(ligands, pairs, mapper_obj, scorer_obj, mapping_options, network_options)
     n_feasible = sum(1 for c in candidates if c.feasible)

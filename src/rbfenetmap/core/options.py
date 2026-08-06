@@ -16,6 +16,7 @@ __all__ = (
     "ChargeChangePolicy",
     "CorePruningPolicy",
     "EdgeDirection",
+    "PairEvaluation",
     "MappingOptions",
     "NetworkOptions",
     "PairStrategy",
@@ -30,6 +31,7 @@ ChargeChangePolicy = Literal["allow", "penalize", "reject"]
 PairStrategy = Literal["all_unordered_pairs", "all_pairs", "star", "linear", "explicit"]
 EdgeDirection = Literal["fewer_softcore_first", "lexicographic", "heavier_second"]
 SelectionObjective = Literal["uniform_redundancy", "connectivity_then_cycles"]
+PairEvaluation = Literal["eager", "adaptive"]
 
 
 def normalize_edge_specs(specs: tuple[str, ...] | list[str] | None) -> frozenset[tuple[str, str]]:
@@ -235,6 +237,13 @@ class NetworkOptions:
     max_cycle_size : int, optional
         Maximum cycle length allowed when adding redundancy edges to improve cycle
         coverage. ``None`` permits any cycle size.
+    pair_evaluation : {"eager", "adaptive"}
+        Whether to map every candidate before planning, or evaluate fingerprint-ranked
+        batches until the requested network targets are met.
+    adaptive_initial_neighbors : int
+        Fingerprint-nearest neighbours evaluated per ligand in the first adaptive batch.
+    adaptive_batch_size : int
+        Maximum number of additional pairs evaluated in each adaptive expansion.
     jobs : int
         Worker processes used for mapping and scoring.
     consistency : {"pairwise", "graph"}
@@ -264,6 +273,9 @@ class NetworkOptions:
     prefilter_min_tanimoto: float = 0.4
     selection_objective: SelectionObjective = "uniform_redundancy"
     max_cycle_size: int | None = None
+    pair_evaluation: PairEvaluation = "eager"
+    adaptive_initial_neighbors: int = 3
+    adaptive_batch_size: int = 32
     jobs: int = 1
     consistency: Literal["pairwise", "graph"] = "pairwise"
     softcore: SoftcorePolicy = field(default_factory=SoftcorePolicy)
@@ -290,6 +302,12 @@ class NetworkOptions:
             )
         if self.max_cycle_size is not None and self.max_cycle_size < 3:
             raise ValueError("max_cycle_size must be at least 3 when set.")
+        if self.pair_evaluation not in ("eager", "adaptive"):
+            raise ValueError("pair_evaluation must be 'eager' or 'adaptive'.")
+        if self.adaptive_initial_neighbors < 1:
+            raise ValueError("adaptive_initial_neighbors must be at least 1.")
+        if self.adaptive_batch_size < 1:
+            raise ValueError("adaptive_batch_size must be at least 1.")
         if self.jobs < 1:
             raise ValueError("jobs must be at least 1.")
         if self.pair_strategy == "star" and not self.hub:

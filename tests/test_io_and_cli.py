@@ -67,6 +67,86 @@ class TestPipeline:
         with pytest.raises(ValueError, match="Duplicate ligand name"):
             build_network([ligand, ligand])
 
+    def test_adaptive_evaluation_stops_before_all_pairs(
+        self, benzamides, dummy_mapper, dummy_scorer, monkeypatch, capsys
+    ):
+        from .conftest import make_transformation
+
+        def fake_evaluate(ligands, pairs, mapper, scorer, mapping_options, network_options, *, progress_callback=None):
+            del ligands, mapper, scorer, mapping_options, network_options
+            if progress_callback:
+                progress_callback(len(pairs))
+            return [make_transformation(*pair) for pair in pairs]
+
+        monkeypatch.setattr("rbfenetmap.core.pipeline.evaluate_pairs", fake_evaluate)
+        network = build_network(
+            benzamides,
+            mapper=dummy_mapper,
+            scorer=dummy_scorer,
+            planner="mst",
+            network_options=NetworkOptions(
+                pair_evaluation="adaptive",
+                adaptive_initial_neighbors=1,
+                adaptive_batch_size=1,
+                edges_per_ligand=1,
+                min_cycle_coverage=0.0,
+                show_progress=True,
+            ),
+        )
+
+        assert nx.is_connected(network.to_networkx())
+        assert len(network.candidates) < len(benzamides) * (len(benzamides) - 1) // 2
+        progress = capsys.readouterr().err
+        assert "Mapping pairs" in progress
+        assert "stopped early" in progress
+
+    def test_adaptive_evaluation_keeps_trying_bridges_until_connected(
+        self, benzamides, dummy_mapper, dummy_scorer, monkeypatch
+    ):
+        from .conftest import make_transformation
+
+        names = sorted(benzamides)
+        feasible_chain = {tuple(sorted(pair)) for pair in zip(names, names[1:])}
+
+        def fake_evaluate(ligands, pairs, mapper, scorer, mapping_options, network_options, *, progress_callback=None):
+            del ligands, mapper, scorer, mapping_options, network_options
+            if progress_callback:
+                progress_callback(len(pairs))
+            return [make_transformation(*pair, feasible=tuple(sorted(pair)) in feasible_chain) for pair in pairs]
+
+        monkeypatch.setattr("rbfenetmap.core.pipeline.evaluate_pairs", fake_evaluate)
+        network = build_network(
+            benzamides,
+            mapper=dummy_mapper,
+            scorer=dummy_scorer,
+            planner="mst",
+            network_options=NetworkOptions(
+                pair_evaluation="adaptive",
+                adaptive_initial_neighbors=1,
+                adaptive_batch_size=1,
+                edges_per_ligand=1,
+                min_cycle_coverage=0.0,
+            ),
+        )
+
+        assert nx.is_connected(network.to_networkx())
+        assert feasible_chain <= {candidate.unordered_key for candidate in network.candidates if candidate.feasible}
+
+    def test_parallel_pair_evaluation_handles_immutable_metadata(self, benzamides, dummy_mapper, dummy_scorer, capsys):
+        network = build_network(
+            dict(list(benzamides.items())[:3]),
+            mapper=dummy_mapper,
+            scorer=dummy_scorer,
+            planner="mst",
+            network_options=NetworkOptions(jobs=2, edges_per_ligand=1, min_cycle_coverage=0.0, show_progress=True),
+        )
+
+        assert len(network.candidates) == 3
+        progress = capsys.readouterr().err
+        assert "Mapping pairs" in progress
+        assert "3/3" in progress
+        assert "stopped early" not in progress
+
 
 class TestNetworkSerialization:
     def test_round_trip_preserves_the_network(self, planned, tmp_path):
@@ -86,6 +166,28 @@ class TestNetworkSerialization:
         path = dump_network(planned, tmp_path / "network.json")
         reloaded = load_network(path)
         assert len(reloaded.rejected) == len(planned.rejected)
+
+    def test_round_trip_preserves_adaptive_options(self, planned, tmp_path):
+        from dataclasses import replace
+
+        planned = replace(
+            planned,
+            options=NetworkOptions(
+                pair_evaluation="adaptive",
+                adaptive_initial_neighbors=2,
+                adaptive_batch_size=7,
+                selection_objective="connectivity_then_cycles",
+                max_cycle_size=4,
+            ),
+        )
+        reloaded = load_network(dump_network(planned, tmp_path / "adaptive.json"))
+
+        assert reloaded.options is not None
+        assert reloaded.options.pair_evaluation == "adaptive"
+        assert reloaded.options.adaptive_initial_neighbors == 2
+        assert reloaded.options.adaptive_batch_size == 7
+        assert reloaded.options.selection_objective == "connectivity_then_cycles"
+        assert reloaded.options.max_cycle_size == 4
 
     def test_incompatible_schema_version_is_refused(self, planned, tmp_path):
         path = tmp_path / "network.json"

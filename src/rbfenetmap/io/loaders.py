@@ -40,7 +40,20 @@ def sanitize_name(raw: str, fallback: str) -> str:
 
 
 def _prepare(mol: Chem.Mol, name: str, source: Path, *, embed_if_missing: bool) -> Ligand | None:
-    """Add hydrogens, ensure a 3D conformer, and wrap in a :class:`Ligand`."""
+    """Ensure a 3D conformer and wrap in a :class:`Ligand`.
+
+    A structure read from a file is taken exactly as written: its atoms are the ligand's
+    atoms. Calling ``AddHs`` on it would not be neutral, because RDKit derives the
+    missing-hydrogen count from valence, and valence comes from the file's bond orders.
+    An Amber mol2 that records a carbonyl as ``C-O`` single rather than ``C=O`` leaves
+    the oxygen looking one bond short, so ``AddHs`` materialises a hydroxyl hydrogen that
+    exists nowhere in the input -- silently, and on every ligand in the set, which then
+    carries into the mapping and every downstream export.
+
+    The trade-off is deliberate: a genuinely hydrogen-less 3D input -- a heavy-atom-only
+    PDB, say -- is now taken at face value rather than protonated for you. Prepare
+    structures fully before planning against them.
+    """
     if mol is None:
         return None
     try:
@@ -50,12 +63,21 @@ def _prepare(mol: Chem.Mol, name: str, source: Path, *, embed_if_missing: bool) 
         return None
 
     has_3d = mol.GetNumConformers() > 0 and mol.GetConformer().Is3D()
-    mol = Chem.AddHs(mol, addCoords=has_3d)
 
-    if not has_3d:
+    if has_3d:
+        # The file's atom list is the ligand. Declaring every atom hydrogen-complete stops
+        # RDKit imputing hydrogens from valence, which is what turned a mis-typed C-O
+        # single bond into a hydroxyl. Bond orders and explicit atoms are untouched.
+        for atom in mol.GetAtoms():
+            atom.SetNoImplicit(True)
+        mol.UpdatePropertyCache(strict=False)
+    else:
         if not embed_if_missing:
             logger.warning("Skipping %s from %s: no 3D conformer.", name, source)
             return None
+        # Only an input with no structure gets its hydrogens built here. There is nothing
+        # to be faithful to in a SMILES string, and Ligand rejects implicit hydrogens.
+        mol = Chem.AddHs(mol)
         # Independently embedded ligands share no frame, so the in-place core RMSD is
         # meaningless across them and every edge will be rejected for geometry. Embedding
         # is a convenience for SMILES input, not a substitute for co-posed structures.

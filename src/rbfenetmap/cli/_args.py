@@ -8,6 +8,7 @@ than no knob.
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -205,12 +206,64 @@ def add_network_arguments(parser: argparse.ArgumentParser) -> None:
         "--prefilter-min-tanimoto", type=float, default=0.4, metavar="F", help="Prefilter similarity floor."
     )
     group.add_argument(
+        "--selection-objective",
+        choices=("uniform_redundancy", "connectivity_then_cycles"),
+        default="uniform_redundancy",
+        help=(
+            "How redundancy is added after the spanning network is built (default: %(default)s). "
+            "'connectivity_then_cycles' prioritizes getting ligands onto at least one cycle."
+        ),
+    )
+    group.add_argument(
+        "--max-cycle-size",
+        type=int,
+        metavar="N",
+        help="When improving cycle coverage, prefer cycles of at most N ligands.",
+    )
+    group.add_argument(
+        "--pair-evaluation",
+        choices=("eager", "adaptive"),
+        default="eager",
+        help=(
+            "Map all candidates up front, or expand fingerprint-ranked batches until network targets are met "
+            "(default: %(default)s)."
+        ),
+    )
+    group.add_argument(
+        "--adaptive-initial-neighbors",
+        type=int,
+        default=3,
+        metavar="K",
+        help="Nearest neighbours mapped per ligand in the first adaptive batch (default: %(default)s).",
+    )
+    group.add_argument(
+        "--adaptive-batch-size",
+        type=int,
+        default=32,
+        metavar="N",
+        help="Pairs mapped per adaptive expansion (default: %(default)s).",
+    )
+    group.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Show pair-mapping progress (default: enabled on an interactive terminal).",
+    )
+    group.add_argument(
         "--consistency",
         choices=("pairwise", "graph"),
         default="pairwise",
         help="'graph' intersects each ligand's core across all its edges (default: %(default)s).",
     )
-    group.add_argument("--jobs", type=int, default=1, metavar="N", help="Worker processes (default: %(default)s).")
+    group.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Worker threads for pair mapping (default: %(default)s). Mapping is partly "
+        "pure Python, so speedup is sublinear and there is nothing to gain from setting "
+        "this above the CPU count.",
+    )
 
 
 def build_mapping_options(args: argparse.Namespace) -> MappingOptions:
@@ -248,6 +301,12 @@ def build_network_options(args: argparse.Namespace) -> NetworkOptions:
         prefilter=args.prefilter,
         prefilter_k=args.prefilter_k,
         prefilter_min_tanimoto=args.prefilter_min_tanimoto,
+        selection_objective=args.selection_objective,
+        max_cycle_size=args.max_cycle_size,
+        pair_evaluation=args.pair_evaluation,
+        adaptive_initial_neighbors=args.adaptive_initial_neighbors,
+        adaptive_batch_size=args.adaptive_batch_size,
+        show_progress=sys.stderr.isatty() if args.progress is None else args.progress,
         jobs=args.jobs,
         consistency=args.consistency,
         softcore=softcore,

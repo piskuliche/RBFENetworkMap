@@ -26,6 +26,32 @@ plan
                 --max-softcore-atoms 12 --show-rejected \
                 --out network.json --export amber html --export-dir ./out
 
+To connect every ligand first, then prioritize getting as many ligands as possible onto
+at least one short cycle:
+
+.. code-block:: bash
+
+   rbfenet plan --ligands ligands.sdf \
+                --edges-per-ligand 1 --min-cycle-coverage 1.0 \
+                --selection-objective connectivity_then_cycles \
+                --pair-evaluation adaptive \
+                --max-cycle-size 4 \
+                --out network.json
+
+``--pair-evaluation adaptive`` fingerprint-ranks the all-pairs pool and maps it in
+batches. It first evaluates each ligand's nearest neighbours, then prioritizes pairs
+that bridge currently disconnected feasible components. Once connected, it evaluates
+more pairs only while requested degree or cycle coverage remains unmet. Connectivity is
+not declared impossible until all remaining component-bridging pairs have been tried.
+The initial breadth and subsequent batch size are controlled by
+``--adaptive-initial-neighbors`` and ``--adaptive-batch-size``.
+
+Pair mapping progress is displayed automatically when stderr is an interactive terminal.
+Use ``--progress`` to force it in a redirected job log or ``--no-progress`` to suppress
+it. Adaptive progress reports the current batch and uses the complete candidate pool as
+its denominator; ``(stopped early)`` means the requested network was satisfied without
+mapping every pair.
+
 ``--validate-exporter amber`` checks that exporter's format constraints *before* the
 expensive mapping stage, so a problem knowable from the inputs alone does not cost a full
 planning run to discover.

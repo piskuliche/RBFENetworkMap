@@ -4,11 +4,14 @@ Soft-core repair
 The constraint
 --------------
 
-An alchemical transformation grows one region of a molecule into another. A mapper,
-however, is free to return a correspondence whose unmapped atoms fall into several
-disconnected pieces. Benzene to *para*-xylene is the everyday example: two hydrogens on
-opposite sides of the ring vanish, giving two separate soft-core regions on one side and
-two appearing methyls on the other. No single transformation can run that.
+An alchemical transformation grows one singly attached region of a molecule into
+another. The final soft-core on each side must therefore be connected and attach to the
+common core through exactly one bond. A mapper, however, is free to return a
+correspondence whose unmapped atoms fall into several disconnected pieces or form a
+bridge between two common-core atoms. Benzene to *para*-xylene is the everyday fragmented
+example: two hydrogens on opposite sides of the ring vanish, giving two separate
+soft-core regions on one side and two appearing methyls on the other. No single
+transformation can run that.
 
 So the partition must either be **repaired** or the edge **rejected**.
 
@@ -83,6 +86,8 @@ rather than whichever threshold happened to be tightest:
      - ``softcore_too_large``
    * - Heavy soft-core exceeds ``max_softcore_fraction`` of a molecule
      - ``softcore_fraction_exceeded``
+   * - A soft-core region has more than one common-core attachment bond
+     - ``softcore_multiple_attachments``
    * - The loop is exhausted
      - ``repair_did_not_converge``
 

@@ -11,6 +11,28 @@ guarantee hold.
 
 Because the second stage only adds, connectivity established in the first cannot be lost.
 
+Adaptive pair evaluation
+------------------------
+
+Mapping dominates runtime for an all-pairs pool. With ``pair_evaluation="adaptive"``,
+the pipeline ranks pairs using inexpensive Morgan fingerprint similarity and evaluates
+only an initial nearest-neighbour graph. Failed mappings split the feasible graph into
+components; the next batch is drawn from pairs crossing those components, so work is
+directed toward the primary connectivity objective. After connectivity, expansion
+favours deficient ligands and short cycle closures and stops when the requested targets
+are met. If no connected network exists, every possible component bridge is evaluated
+before failure is reported.
+
+Two redundancy objectives are available:
+
+``uniform_redundancy``
+   The historical behaviour. Raise degree targets first, then close cycles.
+
+``connectivity_then_cycles``
+   After the spanning network is built, first add edges that place as many ligands as
+   possible onto at least one cycle. Only after that does the planner spend any remaining
+   budget raising degrees above one.
+
 The guarantee, stated exactly
 -----------------------------
 
@@ -42,6 +64,10 @@ A node lies on a cycle exactly when it belongs to a biconnected component of **t
 edges**. Using :func:`networkx.biconnected_component_edges` matters here --
 ``biconnected_components`` alone gives the wrong answer, because a bridge is a biconnected
 component of a single edge and its endpoints would be counted as covered when they are not.
+
+When ``selection_objective="connectivity_then_cycles"``, candidate additions are ranked
+by how many *new* ligands they place on a cycle, then by cycle length, then by cost.
+``max_cycle_size`` can be used to ignore long loops and prefer triangles or 4-cycles.
 
 Knob precedence
 ---------------

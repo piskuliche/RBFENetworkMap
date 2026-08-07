@@ -3,6 +3,10 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+
+# Virtual environments.
+.venv/
+venv/
 .pytest_cache/
 .ruff_cache/
 .coverage
@@ -17,3 +21,4 @@ examples/data/benzamides.sdf
 network.json
 network.html
 amber_out/
+unprot_report/

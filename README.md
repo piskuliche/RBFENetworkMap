@@ -4,8 +4,8 @@ Plan Relative Binding Free Energy perturbation networks from RDKit molecules.
 
 Give it a series of ligands; it returns a scored, tunable network of alchemical
 transformations, each carrying a common-core / soft-core partition that satisfies the
-constraint the package is built around: **a transformation has at most one connected
-soft-core region per side.**
+constraints the package is built around: **a transformation has at most one connected
+soft-core region per side, attached to the common core through exactly one bond.**
 
 ```bash
 pip install -e ".[all]"
@@ -76,6 +76,10 @@ amber masks
   scmask2    :DST&@C1,C2,H12,H13,H14,H15,H16
 ```
 
+Every final soft-core region must also attach to the common core through exactly one
+bond. Bridging regions and ring paths with two or more common-core attachment bonds are
+rejected as ``softcore_multiple_attachments``.
+
 An edge that cannot be repaired within budget is **rejected, not mutated** — and the
 rejection is kept, because it is what explains a sparse or disconnected network:
 
@@ -94,6 +98,10 @@ The feasible candidate graph is disconnected: 2 components.
 | `--n-edges` | Cap on total edges. Below `n_ligands - 1` with connectivity required is a **hard error**, never a silent trim. |
 | `--edges-per-ligand` | Target minimum degree. Best-effort; shortfalls are warned and recorded. |
 | `--min-cycle-coverage` | Fraction of ligands on a cycle. Cycles make free energies checkable against themselves. |
+| `--selection-objective connectivity_then_cycles` | After the spanning network is built, prioritize putting as many ligands as possible onto at least one cycle before chasing uniform extra degree. |
+| `--max-cycle-size` | During cycle coverage, ignore candidate additions that would only make larger cycles than this. |
+| `--pair-evaluation adaptive` | Fingerprint-rank all pairs and run expensive mappings in batches until connectivity and redundancy targets are met. |
+| `--progress` / `--no-progress` | Show or suppress pair-mapping progress. Interactive CLI runs show it automatically. |
 | `--forced-edge` / `--banned-edge` | Absolute. A forced edge bypasses scoring but not feasibility. |
 | `--max-softcore-atoms` | A *feasibility* knob: it changes the candidate pool, not the selection. |
 | `--charge-change-policy` | `allow` / `penalize` / `reject`. |
@@ -102,6 +110,26 @@ The feasible candidate graph is disconnected: 2 components.
 Selection guarantees a spanning network **iff** the feasible candidate graph is
 connected: the MST is built first, the redundancy pass only ever adds, and conflicting
 budgets are rejected up front rather than by trimming the tree.
+
+For a "connect everyone once, then put as many ligands as possible on at least one short
+cycle" workflow:
+
+```bash
+rbfenet plan --ligands ligands.sdf \
+             --edges-per-ligand 1 --min-cycle-coverage 1.0 \
+             --selection-objective connectivity_then_cycles \
+             --pair-evaluation adaptive \
+             --max-cycle-size 4 \
+             --out network.json
+```
+
+Adaptive evaluation starts from each ligand's three nearest fingerprint neighbours,
+maps additional component-bridging pairs until every ligand is connected if possible,
+then expands only while degree or cycle targets remain unmet. Tune its granularity with
+`--adaptive-initial-neighbors` and `--adaptive-batch-size`; keep the default eager mode
+when a complete scored pair matrix is required. Interactive runs show completed mappings,
+elapsed time, throughput, and estimated remaining time; pass `--progress` to retain this
+display when stderr is redirected to a log.
 
 ## Python API
 

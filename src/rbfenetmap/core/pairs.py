@@ -22,7 +22,29 @@ from rbfenetmap.core.options import NetworkOptions, PairStrategy
 if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
 
-__all__ = ("expand_pairs", "fingerprint_prefilter", "generate_candidate_pairs", "reconnect_pairs")
+__all__ = (
+    "expand_pairs",
+    "fingerprint_pair_similarities",
+    "fingerprint_prefilter",
+    "generate_candidate_pairs",
+    "reconnect_pairs",
+)
+
+
+def fingerprint_pair_similarities(
+    ligands: Mapping[str, Ligand], pairs: Sequence[tuple[str, str]]
+) -> dict[tuple[str, str], float]:
+    """Return Morgan/Tanimoto similarity for each requested pair.
+
+    This is deliberately mapping-free and therefore cheap enough to rank an all-pairs
+    pool before any MCS searches are launched.
+    """
+    from rdkit.Chem import rdFingerprintGenerator
+    from rdkit.DataStructs import TanimotoSimilarity
+
+    generator = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+    fingerprints = {name: generator.GetFingerprint(ligand.mol) for name, ligand in ligands.items()}
+    return {pair: float(TanimotoSimilarity(fingerprints[pair[0]], fingerprints[pair[1]])) for pair in pairs}
 
 
 def expand_pairs(

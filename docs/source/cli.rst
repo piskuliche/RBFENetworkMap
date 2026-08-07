@@ -38,6 +38,20 @@ at least one short cycle:
                 --max-cycle-size 4 \
                 --out network.json
 
+To rescue a series whose feasible pool comes back in disconnected pieces, join them with
+counterpoised edges instead of loosening the soft-core budget:
+
+.. code-block:: bash
+
+   rbfenet plan --ligands ligands.sdf \
+                --cbfe bridge \
+                --out network.json --export html amber --export-dir ./out
+
+``--cbfe`` accepts ``off`` (default), ``bridge``, ``cycles``, and ``all``; the price of a
+counterpoised edge is set by ``--cbfe-base-cost`` and ``--cbfe-atom-weight``. See
+:doc:`concepts/network_selection` for what each mode may and may not spend an edge on.
+``--cbfe all`` skips mapping altogether, so ``--mapper`` is ignored there.
+
 ``--pair-evaluation adaptive`` fingerprint-ranks the all-pairs pool and maps it in
 batches. It first evaluates each ligand's nearest neighbours, then prioritizes pairs
 that bridge currently disconnected feasible components. Once connected, it evaluates

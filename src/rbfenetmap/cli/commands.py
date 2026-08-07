@@ -17,7 +17,7 @@ from typing import Sequence
 
 from rbfenetmap.cli._args import build_mapping_options, build_network_options, parse_key_values
 from rbfenetmap.core.exceptions import RBFENetworkMapError
-from rbfenetmap.core.models import Network, Transformation, parse_edge_key
+from rbfenetmap.core.models import EdgeKind, Network, Transformation, parse_edge_key
 from rbfenetmap.core.pipeline import build_candidate, build_network, evaluate_pairs
 from rbfenetmap.io.loaders import load_ligands
 
@@ -88,7 +88,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
         # knowable from the inputs should not cost a full planning run to discover.
         from rbfenetmap.plugins.exporters import create_exporter
 
-        create_exporter(args.validate_exporter).validate(Network(ligands=ligands, edges=(), planner="preflight"))
+        # Carrying the options matters: some format constraints depend on what was asked
+        # for rather than on what was planned, and cbfe_mode is knowable right here.
+        create_exporter(args.validate_exporter).validate(
+            Network(ligands=ligands, edges=(), planner="preflight", options=network_options)
+        )
 
     network = build_network(
         ligands,
@@ -104,10 +108,14 @@ def cmd_plan(args: argparse.Namespace) -> int:
     out = Path(args.out)
     dump_network(network, out)
 
-    print(f"Planned {len(network.edges)} edge(s) over {len(network.ligands)} ligand(s) -> {out}")
+    summary = f"Planned {len(network.edges)} edge(s) over {len(network.ligands)} ligand(s) -> {out}"
+    if network.cbfe_edges:
+        summary += f"\n  {len(network.rbfe_edges)} RBFE, {len(network.cbfe_edges)} CBFE"
+    print(summary)
     rows = [
         [
             edge.key,
+            edge.kind.value,
             f"{edge.score.total:.3f}",
             f"{edge.mapping.n_softcore_1}/{edge.mapping.n_softcore_2}",
             str(edge.mapping.n_common_core),
@@ -115,7 +123,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         ]
         for edge in sorted(network.edges, key=lambda e: e.score.total)
     ]
-    print(_format_table(rows, ["edge", "cost", "soft-core", "core", "repaired"]))
+    print(_format_table(rows, ["edge", "kind", "cost", "soft-core", "core", "repaired"]))
 
     if network.unmet_constraints:
         print("\nUnmet constraints:", file=sys.stderr)
@@ -316,6 +324,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 
     selected = any(e.unordered_key == wanted for e in network.edges)
     print(f"edge          {edge.key}")
+    print(f"kind          {edge.kind.value}")
     print(f"selected      {'yes' if selected else 'no'}")
     print(f"mapper        {edge.mapping.method}")
     print(f"common core   {edge.mapping.n_common_core} pair(s)")
@@ -340,12 +349,17 @@ def cmd_inspect(args: argparse.Namespace) -> int:
                 print(f"  {key:28s} {value:.4f}")
 
     if args.show_masks:
-        from rbfenetmap.io.amber_masks import build_amber_masks
+        if edge.kind is EdgeKind.CBFE:
+            # Printing masks here would print a mask that describes a different, and
+            # runnable, calculation. See AmberExporter for the same refusal.
+            print("\namber masks    not applicable: a CBFE edge decouples both ligands and has no atom mapping.")
+        else:
+            from rbfenetmap.io.amber_masks import build_amber_masks
 
-        masks = build_amber_masks(network.ligands[edge.source], network.ligands[edge.target], edge.mapping)
-        print("\namber masks")
-        for key, value in masks.as_dict().items():
-            print(f"  {key:10s} {value or '(empty)'}")
+            masks = build_amber_masks(network.ligands[edge.source], network.ligands[edge.target], edge.mapping)
+            print("\namber masks")
+            for key, value in masks.as_dict().items():
+                print(f"  {key:10s} {value or '(empty)'}")
 
     if args.draw:
         from rbfenetmap.viz.depict import render_edge_svg

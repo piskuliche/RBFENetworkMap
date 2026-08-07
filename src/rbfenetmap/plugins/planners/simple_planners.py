@@ -43,6 +43,7 @@ class StarPlanner(AbstractNetworkPlanner):
         self, ligands: Mapping[str, Ligand], candidates: Sequence[Transformation], options: NetworkOptions
     ) -> Network:
         """Select the hub's spokes."""
+        self.check_cbfe_support(options)
         feasible = _feasible_by_pair(candidates)
         feasible = {p: e for p, e in feasible.items() if p not in options.banned_pairs}
         hub = options.hub or self._pick_hub(ligands, feasible)
@@ -96,6 +97,7 @@ class ExplicitPlanner(AbstractNetworkPlanner):
         self, ligands: Mapping[str, Ligand], candidates: Sequence[Transformation], options: NetworkOptions
     ) -> Network:
         """Select the named edges, failing loudly on any that is unusable."""
+        self.check_cbfe_support(options)
         if not options.explicit_pairs:
             raise NetworkPlanError("The 'explicit' planner requires explicit_pairs.")
         feasible = _feasible_by_pair(candidates)
@@ -137,6 +139,7 @@ class CompletePlanner(AbstractNetworkPlanner):
         self, ligands: Mapping[str, Ligand], candidates: Sequence[Transformation], options: NetworkOptions
     ) -> Network:
         """Select all feasible edges, honouring bans and any edge cap."""
+        self.check_cbfe_support(options)
         feasible = _feasible_by_pair(candidates)
         feasible = {p: e for p, e in feasible.items() if p not in options.banned_pairs}
         ordered = sorted(feasible.items(), key=lambda item: (item[1].score.total, item[0]))

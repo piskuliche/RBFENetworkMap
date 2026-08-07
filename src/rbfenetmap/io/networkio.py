@@ -21,6 +21,7 @@ from rdkit import Chem
 
 from rbfenetmap.core.models import (
     AtomMapping,
+    EdgeKind,
     EdgeScore,
     Ligand,
     Network,
@@ -66,6 +67,7 @@ def _edge_to_dict(edge: Transformation) -> dict[str, Any]:
     return {
         "source": edge.source,
         "target": edge.target,
+        "kind": edge.kind.value,
         "mapping": {
             "cc1": list(edge.mapping.cc1),
             "cc2": list(edge.mapping.cc2),
@@ -97,7 +99,13 @@ def _edge_to_dict(edge: Transformation) -> dict[str, Any]:
 
 
 def _edge_from_dict(data: dict[str, Any]) -> Transformation:
-    """Rebuild a transformation from its serialized form."""
+    """Rebuild a transformation from its serialized form.
+
+    ``kind`` defaults to RBFE when absent rather than being required, so files written
+    before counterpoised edges existed still load. That is why adding the field did not
+    bump :data:`SCHEMA_VERSION`: a bump would have made every one of those files
+    unreadable to buy a compatibility guarantee the default already provides.
+    """
     mapping_data = data["mapping"]
     mapping = AtomMapping(
         cc1=tuple(mapping_data["cc1"]),
@@ -136,7 +144,14 @@ def _edge_from_dict(data: dict[str, Any]) -> Transformation:
             scorer=score_data.get("scorer", "unknown"),
             descriptors=MappingProxyType(dict(score_data.get("descriptors") or {})),
         )
-    return Transformation(source=data["source"], target=data["target"], mapping=mapping, repair=repair, score=score)
+    return Transformation(
+        source=data["source"],
+        target=data["target"],
+        mapping=mapping,
+        repair=repair,
+        score=score,
+        kind=EdgeKind(data.get("kind", EdgeKind.RBFE.value)),
+    )
 
 
 def network_to_dict(network: Network) -> dict[str, Any]:
@@ -160,6 +175,9 @@ def network_to_dict(network: Network) -> dict[str, Any]:
                 "pair_evaluation": options.pair_evaluation,
                 "adaptive_initial_neighbors": options.adaptive_initial_neighbors,
                 "adaptive_batch_size": options.adaptive_batch_size,
+                "cbfe_mode": options.cbfe_mode,
+                "cbfe_base_cost": options.cbfe_base_cost,
+                "cbfe_atom_weight": options.cbfe_atom_weight,
                 "softcore": {
                     "ring_policy": options.softcore.ring_policy,
                     "max_softcore_atoms": options.softcore.max_softcore_atoms,
@@ -221,6 +239,9 @@ def load_network(path: Path) -> Network:
             pair_evaluation=options_data.get("pair_evaluation", "eager"),
             adaptive_initial_neighbors=options_data.get("adaptive_initial_neighbors", 3),
             adaptive_batch_size=options_data.get("adaptive_batch_size", 32),
+            cbfe_mode=options_data.get("cbfe_mode", "off"),
+            cbfe_base_cost=options_data.get("cbfe_base_cost", 8.0),
+            cbfe_atom_weight=options_data.get("cbfe_atom_weight", 0.05),
             softcore=SoftcorePolicy(**softcore_data) if softcore_data else SoftcorePolicy(),
         )
 

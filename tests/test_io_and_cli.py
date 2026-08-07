@@ -40,6 +40,28 @@ def planned(request):
     )
 
 
+@pytest.fixture(scope="module")
+def mixed_network(planned):
+    """The same series planned with a soft-core budget too tight to keep it connected.
+
+    Tightening the budget until the RBFE pool falls apart is what makes CBFE bridging do
+    anything at all -- on the unconstrained benzamides every pair maps, so every mode is a
+    no-op and would prove nothing.
+    """
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        network = build_network(
+            planned.ligands,
+            network_options=NetworkOptions(
+                cbfe_mode="cycles", softcore=SoftcorePolicy(max_softcore_atoms=2, min_mcs_fraction=0.8)
+            ),
+        )
+    assert network.cbfe_edges and network.rbfe_edges, "fixture must actually be mixed"
+    return network
+
+
 @pytest.mark.integration
 class TestPipeline:
     def test_network_is_connected_and_redundant(self, planned):
@@ -189,6 +211,53 @@ class TestNetworkSerialization:
         assert reloaded.options.selection_objective == "connectivity_then_cycles"
         assert reloaded.options.max_cycle_size == 4
 
+    def test_round_trip_preserves_cbfe_options(self, planned, tmp_path):
+        from dataclasses import replace
+
+        planned = replace(
+            planned, options=NetworkOptions(cbfe_mode="cycles", cbfe_base_cost=6.5, cbfe_atom_weight=0.02)
+        )
+        reloaded = load_network(dump_network(planned, tmp_path / "cbfe.json"))
+
+        assert reloaded.options is not None
+        assert reloaded.options.cbfe_mode == "cycles"
+        assert reloaded.options.cbfe_base_cost == pytest.approx(6.5)
+        assert reloaded.options.cbfe_atom_weight == pytest.approx(0.02)
+
+    def test_edge_kind_survives_the_round_trip(self, planned, tmp_path):
+        from dataclasses import replace
+
+        from rbfenetmap.core.cbfe import make_cbfe_transformation
+        from rbfenetmap.core.models import EdgeKind
+
+        names = list(planned.ligands)
+        cbfe = make_cbfe_transformation(planned.ligands[names[0]], planned.ligands[names[1]], NetworkOptions())
+        mixed = replace(planned, edges=(cbfe, *planned.edges[1:]))
+
+        reloaded = load_network(dump_network(mixed, tmp_path / "mixed.json"))
+        assert reloaded.edges[0].kind is EdgeKind.CBFE
+        assert reloaded.edges[0].mapping.n_common_core == 0
+        assert all(e.kind is EdgeKind.RBFE for e in reloaded.edges[1:])
+
+    def test_a_file_without_a_kind_field_loads_as_rbfe(self, planned, tmp_path):
+        """Files written before counterpoised edges existed must still load.
+
+        That backward compatibility is exactly why adding ``kind`` did not bump the schema
+        version -- a bump would have refused every one of those files instead.
+        """
+        from rbfenetmap.core.models import EdgeKind
+
+        path = tmp_path / "legacy.json"
+        dump_network(planned, path)
+        data = json.loads(path.read_text())
+        for edge in (*data["edges"], *data["candidates"]):
+            del edge["kind"]
+        path.write_text(json.dumps(data))
+
+        reloaded = load_network(path)
+        assert reloaded.edges
+        assert all(e.kind is EdgeKind.RBFE for e in reloaded.edges)
+
     def test_incompatible_schema_version_is_refused(self, planned, tmp_path):
         path = tmp_path / "network.json"
         dump_network(planned, path)
@@ -258,6 +327,83 @@ class TestExporters:
         assert set(payload) >= {"atommapindices", "atommapnames", "timask1", "scmask1", "scmask2"}
         assert len(payload["atommapindices"]) == len(payload["atommapnames"])
         assert (tmp_path / "edges.dat").exists()
+
+    def test_amber_splits_a_mixed_network_by_alchemical_mode(self, mixed_network, tmp_path):
+        """amberstudio takes ``alchemical_mode`` per BuildEdges run, not per edge.
+
+        So a mixed network is two runs, and the export has to be two directories the two
+        runs can each be pointed at.
+        """
+        pytest.importorskip("yaml")
+
+        from rbfenetmap.plugins.exporters import create_exporter
+
+        create_exporter("amber").export(mixed_network, tmp_path)
+
+        cbfe_lines = (tmp_path / "cbfe" / "edges.txt").read_text().splitlines()
+        rbfe_lines = (tmp_path / "rbfe" / "edges.txt").read_text().splitlines()
+        assert cbfe_lines == [f"{e.source}~{e.target}" for e in mixed_network.cbfe_edges]
+        assert rbfe_lines == [f"{e.source}~{e.target}" for e in mixed_network.rbfe_edges]
+        assert all(line.count("~") == 1 for line in (*cbfe_lines, *rbfe_lines))
+
+        # A CBFE edge needs only its name: amberstudio builds the masks from the residue
+        # roles, so there is nothing else to convey.
+        assert not list((tmp_path / "cbfe").glob("*.runconfig"))
+        runconfigs = sorted((tmp_path / "rbfe").glob("atommap_*.runconfig"))
+        assert len(runconfigs) == len(mixed_network.rbfe_edges)
+
+    def test_amber_keeps_the_flat_layout_for_an_all_rbfe_network(self, planned, tmp_path):
+        pytest.importorskip("yaml")
+
+        from rbfenetmap.plugins.exporters import create_exporter
+
+        create_exporter("amber").export(planned, tmp_path)
+        assert (tmp_path / "edges.dat").exists()
+        assert not (tmp_path / "rbfe").exists()
+        assert not (tmp_path / "cbfe").exists()
+
+    def test_amber_masks_refuse_an_empty_common_core(self, planned):
+        """Left unguarded this produces a runnable calculation that answers a different question."""
+        from rbfenetmap.core.cbfe import make_cbfe_transformation
+
+        names = list(planned.ligands)
+        cbfe = make_cbfe_transformation(planned.ligands[names[0]], planned.ligands[names[1]], NetworkOptions())
+        with pytest.raises(ExporterError, match="no common core"):
+            build_amber_masks(planned.ligands[cbfe.source], planned.ligands[cbfe.target], cbfe.mapping)
+
+    def test_edgelist_appends_the_kind_column(self, mixed_network, tmp_path):
+        from rbfenetmap.plugins.exporters import create_exporter
+
+        (path,) = create_exporter("edgelist").export(mixed_network, tmp_path)
+        lines = path.read_text().splitlines()
+        assert lines[0].endswith(" kind")
+        kinds = [line.split()[-1] for line in lines[1:]]
+        assert sorted(kinds) == sorted(e.kind.value for e in mixed_network.edges)
+        # Positional consumers must keep reading the same fields they always did.
+        assert all(line.split()[0] and line.split()[1] for line in lines[1:])
+
+    def test_html_report_marks_cbfe_edges(self, mixed_network, tmp_path):
+        from rbfenetmap.plugins.exporters import create_exporter
+
+        (path,) = create_exporter("html").export(mixed_network, tmp_path)
+        text = path.read_text()
+
+        assert "CBFE edges</div>" in text, "the summary should count them separately"
+        assert "CBFE edge (counterpoised)" in text, "and the legend should explain the violet line"
+        assert text.count('class="edge edge-cbfe"') == len(mixed_network.cbfe_edges)
+        assert "atoms fully decoupled" in text
+        assert "common core 0" not in text, "a CBFE card must not read as a broken RBFE one"
+
+    def test_html_report_with_cbfe_edges_is_still_self_contained(self, mixed_network, tmp_path):
+        import re
+
+        from rbfenetmap.plugins.exporters import create_exporter
+
+        (path,) = create_exporter("html").export(mixed_network, tmp_path)
+        text = path.read_text()
+        assert "<script" not in text
+        assert not re.search(r"\bsrc\s*=", text)
+        assert not re.search(r"<link\b", text)
 
     def test_amber_validate_catches_problems_before_writing(self, planned, tmp_path, monkeypatch):
         from rbfenetmap.core.models import Ligand
@@ -343,6 +489,46 @@ class TestCLI:
 
         network = load_network(out)
         network.validate()
+
+    def test_cbfe_all_plans_without_ever_invoking_a_mapper(self, planned, tmp_path, capsys, monkeypatch):
+        """Pins the short-circuit: no MCS work is done for an all-counterpoised network.
+
+        Sabotaging ``create_mapper`` is the only way to prove a *negative* here -- a timing
+        assertion would be flaky, and counting calls would still pass if the mapper were
+        resolved and then handed an empty pair list.
+        """
+        from rdkit import Chem
+
+        import rbfenetmap.plugins.mappers as mappers
+
+        sdf = tmp_path / "ligands.sdf"
+        with Chem.SDWriter(str(sdf)) as writer:
+            for ligand in planned.ligands.values():
+                mol = Chem.Mol(ligand.mol)
+                mol.SetProp("_Name", ligand.name)
+                writer.write(mol)
+
+        def explode(*args, **kwargs):
+            raise AssertionError("cbfe_mode='all' must not resolve a mapper")
+
+        monkeypatch.setattr(mappers, "create_mapper", explode)
+
+        out = tmp_path / "cbfe.json"
+        assert main(["plan", "--ligands", str(sdf), "--out", str(out), "--cbfe", "all"]) == 0
+
+        network = load_network(out)
+        network.validate()
+        assert network.edges
+        assert network.rbfe_edges == ()
+        assert "CBFE" in capsys.readouterr().out
+
+    def test_cbfe_flag_is_documented_in_plan_help(self, capsys):
+        with pytest.raises(SystemExit):
+            main(["plan", "--help"])
+        help_text = capsys.readouterr().out
+        assert "--cbfe" in help_text
+        assert "--cbfe-base-cost" in help_text
+        assert "counterpoised" in help_text.lower()
 
     def test_n_edges_conflict_exits_nonzero(self, planned, tmp_path, capsys):
         from rdkit import Chem

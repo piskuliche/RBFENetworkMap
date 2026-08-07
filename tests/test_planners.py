@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from rbfenetmap.core.exceptions import NetworkPlanError
-from rbfenetmap.core.models import Ligand
+from rbfenetmap.core.models import EdgeKind, Ligand
 from rbfenetmap.core.options import NetworkOptions
 from rbfenetmap.plugins.planners import create_planner
 
@@ -162,6 +162,141 @@ class TestMSTPlanner:
         assert ("bza_CF3", "bza_H") not in selected, "the short-cycle objective should skip the cheap 5-cycle"
         assert len(selected & {("bza_Cl", "bza_H"), ("bza_CF3", "bza_Cl")}) == 1
         assert any("edges_per_ligand" in c for c in network.unmet_constraints)
+
+
+class TestCBFEPlacement:
+    """Where the planner is and is not allowed to spend a counterpoised edge.
+
+    The disconnected pool here is the same one ``test_disconnected_pool_names_the_bridging_rejections``
+    proves is a hard failure with CBFE off, so these tests read as the delta the feature buys.
+    """
+
+    @staticmethod
+    def _split_pool():
+        """Two components, {H, F} and {Cl, Me}, with the only bridge rejected."""
+        return [
+            make_transformation("bza_H", "bza_F", cost=1.0),
+            make_transformation("bza_Cl", "bza_Me", cost=1.0),
+            make_transformation("bza_F", "bza_Cl", feasible=False),
+        ]
+
+    def test_bridge_joins_components_that_would_otherwise_raise(self, square_ligands):
+        network = create_planner("mst").plan(
+            square_ligands, self._split_pool(), NetworkOptions(cbfe_mode="bridge", edges_per_ligand=1)
+        )
+        assert len(network.cbfe_edges) == 1, "two components need exactly one bridge"
+        assert len(network.rbfe_edges) == 2
+        assert not any("disconnected" in c for c in network.unmet_constraints)
+
+    def test_bridge_adds_nothing_to_an_already_connected_pool(self, square_ligands, square_candidates):
+        network = create_planner("mst").plan(square_ligands, square_candidates, NetworkOptions(cbfe_mode="bridge"))
+        assert network.cbfe_edges == ()
+
+    def test_bridge_alone_does_not_close_cycles(self, square_ligands):
+        with pytest.warns(UserWarning, match="min_cycle_coverage"):
+            network = create_planner("mst").plan(
+                square_ligands, self._split_pool(), NetworkOptions(cbfe_mode="bridge", edges_per_ligand=1)
+            )
+        assert any("min_cycle_coverage" in c for c in network.unmet_constraints)
+        assert len(network.cbfe_edges) == 1
+
+    def test_cycles_spends_further_edges_to_meet_the_coverage_target(self, square_ligands):
+        network = create_planner("mst").plan(
+            square_ligands, self._split_pool(), NetworkOptions(cbfe_mode="cycles", edges_per_ligand=1)
+        )
+        assert len(network.cbfe_edges) > 1, "beyond the single bridge, to close a cycle"
+        assert not any("min_cycle_coverage" in c for c in network.unmet_constraints)
+
+    def test_cycles_does_not_spend_cbfe_on_degree_targets(self, square_ligands):
+        """The injection ordering, pinned.
+
+        Degree raising runs against a pool with the CBFE edges filtered out, so an
+        unreachable ``edges_per_ligand`` must still be reported rather than quietly bought
+        with counterpoised calculations.
+        """
+        candidates = [
+            make_transformation("bza_H", "bza_F", cost=1.0),
+            make_transformation("bza_F", "bza_Cl", cost=1.0),
+            make_transformation("bza_Cl", "bza_Me", cost=1.0),
+            make_transformation("bza_H", "bza_Me", cost=1.0),
+        ]
+        options = NetworkOptions(cbfe_mode="cycles", edges_per_ligand=3)
+        with pytest.warns(UserWarning, match="edges_per_ligand"):
+            network = create_planner("mst").plan(square_ligands, candidates, options)
+        assert any("edges_per_ligand" in c for c in network.unmet_constraints)
+        assert every_ligand_has_degree_two(network)
+
+    def test_an_rbfe_edge_is_preferred_over_a_cheaper_cbfe_edge_for_the_same_coverage(self, square_ligands):
+        """Cost already carries the CBFE penalty; the ranking is about provenance."""
+        candidates = [
+            make_transformation("bza_H", "bza_F", cost=1.0),
+            make_transformation("bza_F", "bza_Cl", cost=1.0),
+            make_transformation("bza_Cl", "bza_Me", cost=1.0),
+            make_transformation("bza_H", "bza_Me", cost=20.0),
+        ]
+        # A CBFE edge would cost ~9, well under the 20 of the closing RBFE edge.
+        network = create_planner("mst").plan(
+            square_ligands, candidates, NetworkOptions(cbfe_mode="cycles", edges_per_ligand=1)
+        )
+        assert network.cbfe_edges == (), "the expensive relative edge should still win"
+        assert ("bza_H", "bza_Me") in {e.unordered_key for e in network.edges}
+
+    def test_a_forced_pair_only_cbfe_can_supply_is_honoured_and_reported(self, square_ligands):
+        candidates = [
+            make_transformation("bza_H", "bza_F", cost=1.0),
+            make_transformation("bza_F", "bza_Cl", cost=1.0),
+            make_transformation("bza_Cl", "bza_Me", cost=1.0),
+            make_transformation("bza_H", "bza_Me", feasible=False),
+        ]
+        options = NetworkOptions(cbfe_mode="bridge", forced_edges=("bza_H~bza_Me",), edges_per_ligand=1)
+        network = create_planner("mst").plan(square_ligands, candidates, options)
+
+        forced = next(e for e in network.edges if e.unordered_key == ("bza_H", "bza_Me"))
+        assert forced.kind is EdgeKind.CBFE
+        assert any("supplied as a CBFE edge" in c for c in network.unmet_constraints), (
+            "a substitution the user did not ask for must be reported, not silent"
+        )
+
+    def test_a_forced_pair_is_honoured_even_inside_one_component(self, square_ligands, square_candidates):
+        """Forced outranks the mode ladder: bridge mode still supplies a non-bridging pair."""
+        candidates = [c for c in square_candidates if c.unordered_key != ("bza_Cl", "bza_Me")]
+        candidates.append(make_transformation("bza_Cl", "bza_Me", feasible=False))
+        options = NetworkOptions(cbfe_mode="bridge", forced_edges=("bza_Cl~bza_Me",))
+        network = create_planner("mst").plan(square_ligands, candidates, options)
+        assert ("bza_Cl", "bza_Me") in {e.unordered_key for e in network.cbfe_edges}
+
+    def test_banned_pairs_are_never_used_as_bridges(self, square_ligands):
+        """With every crossing pair banned, the connectivity failure must still be a failure."""
+        options = NetworkOptions(
+            cbfe_mode="bridge", banned_edges=("bza_H~bza_Cl", "bza_H~bza_Me", "bza_F~bza_Cl", "bza_F~bza_Me")
+        )
+        with pytest.raises(NetworkPlanError) as excinfo:
+            create_planner("mst").plan(square_ligands, self._split_pool(), options)
+        message = str(excinfo.value)
+        assert "banned_edges" in message
+        assert "Loosen the soft-core budget" not in message, "the soft-core budget is irrelevant to a CBFE bridge"
+
+    def test_off_mode_advertises_the_bridge_option(self, square_ligands):
+        with pytest.raises(NetworkPlanError, match="cbfe_mode='bridge'"):
+            create_planner("mst").plan(square_ligands, self._split_pool(), NetworkOptions())
+
+    @pytest.mark.parametrize("planner", ["star", "complete", "explicit"])
+    @pytest.mark.parametrize("mode", ["bridge", "cycles"])
+    def test_planners_that_cannot_place_cbfe_edges_say_so(self, square_ligands, planner, mode):
+        options = NetworkOptions(cbfe_mode=mode, explicit_pairs=("bza_H~bza_F",), hub="bza_H")
+        with pytest.raises(NetworkPlanError, match="cannot place CBFE edges"):
+            create_planner(planner).plan(square_ligands, [], options)
+
+    @pytest.mark.parametrize("planner", ["star", "complete"])
+    def test_all_mode_needs_no_planner_support(self, square_ligands, square_candidates, planner):
+        """``all`` is a pool substitution made upstream, so any planner can honour it."""
+        create_planner(planner).plan(square_ligands, square_candidates, NetworkOptions(cbfe_mode="all", hub="bza_H"))
+
+
+def every_ligand_has_degree_two(network) -> bool:
+    """Whether no ligand exceeded the degree the RBFE pool alone could support."""
+    graph = network.to_networkx()
+    return all(graph.degree(node) <= 2 for node in graph.nodes)
 
 
 class TestKnobPrecedence:

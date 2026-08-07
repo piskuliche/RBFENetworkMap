@@ -31,6 +31,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 __all__ = (
     "EDGE_SEPARATOR",
     "AtomMapping",
+    "EdgeKind",
     "EdgeScore",
     "Ligand",
     "Network",
@@ -66,6 +67,30 @@ class RejectionReason(str, Enum):
     CORE_GEOMETRY_MISMATCH = "core_geometry_mismatch"
     REPAIR_DID_NOT_CONVERGE = "repair_did_not_converge"
     MAPPER_FAILED = "mapper_failed"
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return self.value
+
+
+class EdgeKind(str, Enum):
+    """Which alchemical experiment an edge stands for.
+
+    ``RBFE`` is the relative calculation this package was built to plan: one common core
+    held fixed while two soft-core regions are grown and shrunk. ``CBFE`` is a
+    *counterpoised* binding free energy -- two absolute calculations run simultaneously in
+    opposite directions, one ligand decoupling as the other couples.
+
+    A CBFE edge needs no correspondence between the two ligands, because neither molecule
+    is being morphed into the other. That is what makes it useful to a network planner: it
+    is available between *any* two ligands, including the pairs an MCS search cannot
+    relate at all, so it can join subnetworks that RBFE alone leaves disconnected.
+
+    A ``str`` enum for the same reason as :class:`RejectionReason` -- it serializes to
+    JSON as itself and compares equal to a plain string.
+    """
+
+    RBFE = "rbfe"
+    CBFE = "cbfe"
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         return self.value
@@ -550,6 +575,9 @@ class Transformation:
         What the repair did to get there.
     score : EdgeScore
         The cost and feasibility verdict.
+    kind : EdgeKind
+        Which alchemical experiment this edge stands for. Defaults to
+        :attr:`EdgeKind.RBFE`, so every existing construction site keeps its meaning.
     """
 
     source: str
@@ -557,11 +585,26 @@ class Transformation:
     mapping: AtomMapping
     repair: SoftcoreRepair = field(default_factory=SoftcoreRepair)
     score: EdgeScore = field(default_factory=lambda: EdgeScore.rejected(RejectionReason.MAPPER_FAILED))
+    kind: EdgeKind = EdgeKind.RBFE
 
     def __post_init__(self) -> None:
-        """Reject self-loops, which are meaningless as alchemical transformations."""
+        """Reject self-loops and CBFE edges that claim a common core.
+
+        The common-core check is one-way on purpose. A CBFE edge decouples both ligands
+        entirely, so a non-empty common core makes it a different experiment than the one
+        it is labelled as -- and, exported to Amber, a *runnable* one, which is how a
+        mislabelled edge would reach production silently. The converse is not an error:
+        an RBFE candidate whose mapper found nothing legitimately carries an empty core
+        and is rejected on feasibility grounds instead.
+        """
         if self.source == self.target:
             raise ValueError(f"Transformation source and target are both {self.source!r}; self-loops are not edges.")
+        if self.kind is EdgeKind.CBFE and self.mapping.n_common_core:
+            raise ValueError(
+                f"CBFE edge {self.key!r} carries a common core of {self.mapping.n_common_core} atom(s). "
+                "A counterpoised calculation decouples both ligands completely, so its mapping must be "
+                "entirely soft-core (cc1 and cc2 empty)."
+            )
 
     @property
     def key(self) -> str:
@@ -615,6 +658,7 @@ class Transformation:
                 trace=trace,
             ),
             score=self.score,
+            kind=self.kind,
         )
 
 
@@ -651,15 +695,18 @@ class Network:
     def to_networkx(self) -> "nx.Graph":
         """Return the selected edges as an undirected :class:`networkx.Graph`.
 
-        Nodes are ligand names; each edge carries ``transformation`` and ``weight``
-        (the score total) attributes.
+        Nodes are ligand names; each edge carries ``transformation``, ``weight`` (the
+        score total), and ``kind`` (the :class:`EdgeKind` value as a plain string)
+        attributes. ``kind`` is duplicated out of the transformation so consumers that
+        only style or filter edges -- the SVG renderer, the GraphML exporter -- never have
+        to reach back through the object.
         """
         import networkx as nx
 
         graph: nx.Graph = nx.Graph()
         graph.add_nodes_from(self.ligands)
         for edge in self.edges:
-            graph.add_edge(edge.source, edge.target, transformation=edge, weight=edge.score.total)
+            graph.add_edge(edge.source, edge.target, transformation=edge, weight=edge.score.total, kind=edge.kind.value)
         return graph
 
     def validate(self, *, require_connected: bool = True) -> None:
@@ -702,3 +749,18 @@ class Network:
     def rejected(self) -> tuple[Transformation, ...]:
         """Candidates that were found infeasible."""
         return tuple(c for c in self.candidates if not c.feasible)
+
+    @property
+    def rbfe_edges(self) -> tuple[Transformation, ...]:
+        """Selected edges that are relative transformations."""
+        return tuple(e for e in self.edges if e.kind is EdgeKind.RBFE)
+
+    @property
+    def cbfe_edges(self) -> tuple[Transformation, ...]:
+        """Selected edges that are counterpoised (paired absolute) calculations.
+
+        The two properties partition :attr:`edges`; they are separate because the two
+        kinds are set up and run by different machinery downstream, so almost every
+        consumer wants one or the other rather than the mixed list.
+        """
+        return tuple(e for e in self.edges if e.kind is EdgeKind.CBFE)

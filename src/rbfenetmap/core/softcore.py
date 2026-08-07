@@ -79,10 +79,7 @@ def softcore_attachment_edges(graph: nx.Graph, softcore: Iterable[int]) -> list[
     """
     softcore_set = set(softcore)
     return sorted(
-        (atom, neighbor)
-        for atom in softcore_set
-        for neighbor in graph.neighbors(atom)
-        if neighbor not in softcore_set
+        (atom, neighbor) for atom in softcore_set for neighbor in graph.neighbors(atom) if neighbor not in softcore_set
     )
 
 

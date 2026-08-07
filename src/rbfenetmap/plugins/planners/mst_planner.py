@@ -337,7 +337,9 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
             except nx.NetworkXNoPath:
                 return None
 
-        def rank(pair: tuple[str, str], current_covered: set[str]) -> tuple[float, float, float, tuple[str, str]] | None:
+        def rank(
+            pair: tuple[str, str], current_covered: set[str]
+        ) -> tuple[float, float, float, tuple[str, str]] | None:
             """Rank a candidate edge by new cycle coverage, then shortness, then cost."""
             cycle_size = cycle_size_if_added(selected, pair)
             if cycle_size is None:

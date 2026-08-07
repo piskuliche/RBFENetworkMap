@@ -298,13 +298,7 @@ def evaluate_pairs_adaptively(
             )
             candidates.extend(
                 evaluate_pairs(
-                    ligands,
-                    batch,
-                    mapper,
-                    scorer,
-                    mapping_options,
-                    network_options,
-                    progress_callback=progress.update,
+                    ligands, batch, mapper, scorer, mapping_options, network_options, progress_callback=progress.update
                 )
             )
 
@@ -352,9 +346,7 @@ def evaluate_pairs_adaptively(
             chosen = set(batch)
             remaining = [pair for pair in remaining if pair not in chosen]
 
-    logger.info(
-        "Adaptive evaluation stopped after %d of %d candidate pair(s)", len(candidates), len(pairs)
-    )
+    logger.info("Adaptive evaluation stopped after %d of %d candidate pair(s)", len(candidates), len(pairs))
     # Re-plan outside warning suppression so any genuinely unmet best-effort target is
     # visible exactly once. For a required but impossible connection this raises with
     # diagnostics after all component-bridging possibilities have been attempted.

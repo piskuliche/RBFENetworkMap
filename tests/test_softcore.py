@@ -243,13 +243,9 @@ class TestRepairOnMolecules:
             if atom.GetIdx() not in softcore_heavy
             and not (atom.GetAtomicNum() == 1 and atom.GetNeighbors()[0].GetIdx() in softcore_heavy)
         }
-        mapping = AtomMapping.from_core_pairs(
-            core, n_atoms_1=ligand.n_atoms, n_atoms_2=ligand.n_atoms, method="test"
-        )
+        mapping = AtomMapping.from_core_pairs(core, n_atoms_1=ligand.n_atoms, n_atoms_2=ligand.n_atoms, method="test")
 
-        returned, repair = repair_softcore_connectivity(
-            ligand, ligand, mapping, SoftcorePolicy(ring_policy="none")
-        )
+        returned, repair = repair_softcore_connectivity(ligand, ligand, mapping, SoftcorePolicy(ring_policy="none"))
 
         assert returned == mapping
         assert repair.rejection is RejectionReason.SOFTCORE_MULTIPLE_ATTACHMENTS

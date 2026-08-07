@@ -44,9 +44,7 @@ def fingerprint_pair_similarities(
 
     generator = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
     fingerprints = {name: generator.GetFingerprint(ligand.mol) for name, ligand in ligands.items()}
-    return {
-        pair: float(TanimotoSimilarity(fingerprints[pair[0]], fingerprints[pair[1]])) for pair in pairs
-    }
+    return {pair: float(TanimotoSimilarity(fingerprints[pair[0]], fingerprints[pair[1]])) for pair in pairs}
 
 
 def expand_pairs(

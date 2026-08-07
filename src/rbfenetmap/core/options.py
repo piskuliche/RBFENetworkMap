@@ -301,9 +301,7 @@ class NetworkOptions:
         if self.n_edges is not None and self.n_edges < 1:
             raise ValueError("n_edges must be at least 1 when set.")
         if self.selection_objective not in ("uniform_redundancy", "connectivity_then_cycles"):
-            raise ValueError(
-                "selection_objective must be 'uniform_redundancy' or 'connectivity_then_cycles'."
-            )
+            raise ValueError("selection_objective must be 'uniform_redundancy' or 'connectivity_then_cycles'.")
         if self.max_cycle_size is not None and self.max_cycle_size < 3:
             raise ValueError("max_cycle_size must be at least 3 when set.")
         if self.pair_evaluation not in ("eager", "adaptive"):

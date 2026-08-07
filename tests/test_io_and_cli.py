@@ -72,9 +72,7 @@ class TestPipeline:
     ):
         from .conftest import make_transformation
 
-        def fake_evaluate(
-            ligands, pairs, mapper, scorer, mapping_options, network_options, *, progress_callback=None
-        ):
+        def fake_evaluate(ligands, pairs, mapper, scorer, mapping_options, network_options, *, progress_callback=None):
             del ligands, mapper, scorer, mapping_options, network_options
             if progress_callback:
                 progress_callback(len(pairs))
@@ -110,15 +108,11 @@ class TestPipeline:
         names = sorted(benzamides)
         feasible_chain = {tuple(sorted(pair)) for pair in zip(names, names[1:])}
 
-        def fake_evaluate(
-            ligands, pairs, mapper, scorer, mapping_options, network_options, *, progress_callback=None
-        ):
+        def fake_evaluate(ligands, pairs, mapper, scorer, mapping_options, network_options, *, progress_callback=None):
             del ligands, mapper, scorer, mapping_options, network_options
             if progress_callback:
                 progress_callback(len(pairs))
-            return [
-                make_transformation(*pair, feasible=tuple(sorted(pair)) in feasible_chain) for pair in pairs
-            ]
+            return [make_transformation(*pair, feasible=tuple(sorted(pair)) in feasible_chain) for pair in pairs]
 
         monkeypatch.setattr("rbfenetmap.core.pipeline.evaluate_pairs", fake_evaluate)
         network = build_network(
@@ -138,20 +132,13 @@ class TestPipeline:
         assert nx.is_connected(network.to_networkx())
         assert feasible_chain <= {candidate.unordered_key for candidate in network.candidates if candidate.feasible}
 
-    def test_parallel_pair_evaluation_handles_immutable_metadata(
-        self, benzamides, dummy_mapper, dummy_scorer, capsys
-    ):
+    def test_parallel_pair_evaluation_handles_immutable_metadata(self, benzamides, dummy_mapper, dummy_scorer, capsys):
         network = build_network(
             dict(list(benzamides.items())[:3]),
             mapper=dummy_mapper,
             scorer=dummy_scorer,
             planner="mst",
-            network_options=NetworkOptions(
-                jobs=2,
-                edges_per_ligand=1,
-                min_cycle_coverage=0.0,
-                show_progress=True,
-            ),
+            network_options=NetworkOptions(jobs=2, edges_per_ligand=1, min_cycle_coverage=0.0, show_progress=True),
         )
 
         assert len(network.candidates) == 3

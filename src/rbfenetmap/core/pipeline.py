@@ -16,10 +16,12 @@ import sys
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from typing import Callable, Mapping, Sequence
 
 import networkx as nx
 
+from rbfenetmap.core.cbfe import build_cbfe_pool, make_cbfe_transformation
 from rbfenetmap.core.descriptors import compute_descriptors
 from rbfenetmap.core.exceptions import MappingError, RepairError
 from rbfenetmap.core.meta.mappers import AbstractMapper
@@ -271,8 +273,31 @@ def evaluate_pairs_adaptively(
     feasible components. If connectivity remains impossible, every possible bridge is
     eventually evaluated before the planner reports failure. Once connected, additional
     batches favour deficient ligands and edges that form short cycles.
+
+    Notes
+    -----
+    Both interactions with ``cbfe_mode`` are deliberate, and they go opposite ways.
+
+    The connectivity branch is left alone. It keys on the *feasible RBFE graph*, so with
+    ``cbfe_mode="bridge"`` it still exhausts every cross-component pair before giving up --
+    which is exactly what that mode means. A user might reasonably expect enabling CBFE to
+    make the search stop sooner; it does not, because the only way to know RBFE cannot
+    reach across a gap is to try.
+
+    The intermediate plan, by contrast, is probed with CBFE switched *off*. Left on, a
+    ``cycles``-mode plan would satisfy ``min_cycle_coverage`` with counterpoised edges,
+    come back with no unmet constraints, and stop the loop -- so CBFE would mask the
+    shortfall and short-circuit the very RBFE expansion this function exists to drive. The
+    probe also drops ``require_connected``, because it can be reached with a pool no
+    further mapping can connect, where the raise is the intended outcome only for the final
+    plan. That final plan, below, uses the caller's options unchanged.
     """
     names = list(ligands)
+    probe_options = (
+        network_options
+        if network_options.cbfe_mode == "off"
+        else replace(network_options, cbfe_mode="off", require_connected=False)
+    )
     similarities = fingerprint_pair_similarities(ligands, pairs)
     ranked_pairs = sorted(pairs, key=lambda pair: (-similarities[pair], pair))
     initial = _initial_adaptive_pairs(
@@ -320,7 +345,7 @@ def evaluate_pairs_adaptively(
                 # still growing; only warnings from the final returned plan are useful.
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
-                    last_network = planner.plan(ligands, candidates, network_options)
+                    last_network = planner.plan(ligands, candidates, probe_options)
 
                 if not last_network.unmet_constraints or not remaining:
                     break
@@ -353,6 +378,27 @@ def evaluate_pairs_adaptively(
     return planner.plan(ligands, candidates, network_options)
 
 
+def _all_cbfe_candidates(ligands: Mapping[str, Ligand], network_options: NetworkOptions) -> tuple[Transformation, ...]:
+    """Build the counterpoised candidate pool for ``cbfe_mode="all"``.
+
+    Unlike the bridging pool, these *are* materialized as transformations: they are the
+    only candidates the planner will ever see, so they have to occupy the place the mapped
+    ones normally would -- including on :attr:`~rbfenetmap.core.models.Network.candidates`,
+    where they are the honest audit trail for a network in which nothing was mapped.
+
+    Parameters
+    ----------
+    ligands : Mapping[str, Ligand]
+    network_options : NetworkOptions
+
+    Returns
+    -------
+    tuple[Transformation, ...]
+    """
+    pool = build_cbfe_pool(ligands, network_options)
+    return tuple(make_cbfe_transformation(ligands[a], ligands[b], network_options) for a, b in sorted(pool))
+
+
 def build_network(
     ligands: Sequence[Ligand] | Mapping[str, Ligand],
     *,
@@ -369,7 +415,10 @@ def build_network(
     ligands : Sequence[Ligand] or Mapping[str, Ligand]
         The vertices. Names must be unique.
     mapper, scorer, planner : AbstractMapper or AbstractScorer or AbstractNetworkPlanner or str
-        Plugin instances, or names to look up in the built-in registries.
+        Plugin instances, or names to look up in the built-in registries. Under
+        ``network_options.cbfe_mode == "all"`` the mapper and scorer are never used -- a
+        counterpoised edge has no core to map and a closed-form cost -- and a mapper name
+        is not even resolved, so an unavailable optional mapper is not an error there.
     mapping_options : MappingOptions, optional
     network_options : NetworkOptions, optional
 
@@ -413,9 +462,21 @@ def build_network(
     network_options = network_options or NetworkOptions()
     network_options.check_edge_budget(len(ligands))
 
-    mapper_obj = create_mapper(mapper) if isinstance(mapper, str) else mapper
     scorer_obj = create_scorer(scorer) if isinstance(scorer, str) else scorer
     planner_obj = create_planner(planner) if isinstance(planner, str) else planner
+    # Before the mapping stage, so a planner that cannot honour the requested CBFE mode
+    # fails in the first second of a run rather than after several minutes of MCS work.
+    planner_obj.check_cbfe_support(network_options)
+
+    if network_options.cbfe_mode == "all":
+        # No mapper is resolved at all: a counterpoised edge has no common core to find, so
+        # every MCS search would be work whose result is discarded. On a large series this
+        # is the difference between minutes and milliseconds.
+        candidates = _all_cbfe_candidates(ligands, network_options)
+        logger.info("cbfe_mode='all': planning over %d counterpoised candidate(s), no mapping", len(candidates))
+        return planner_obj.plan(ligands, candidates, network_options)
+
+    mapper_obj = create_mapper(mapper) if isinstance(mapper, str) else mapper
 
     pairs, restored = generate_candidate_pairs(ligands, network_options)
     if restored:

@@ -244,6 +244,31 @@ def add_network_arguments(parser: argparse.ArgumentParser) -> None:
         help="Pairs mapped per adaptive expansion (default: %(default)s).",
     )
     group.add_argument(
+        "--cbfe",
+        choices=("off", "bridge", "cycles", "all"),
+        default="off",
+        help=(
+            "Use counterpoised (CBFE) edges, which need no atom mapping and so are available between any "
+            "two ligands: 'bridge' only to join subnetworks no feasible RBFE edge can reach, 'cycles' also "
+            "to put ligands on a cycle, 'all' for an entirely counterpoised network (skips mapping "
+            "altogether). Default: %(default)s."
+        ),
+    )
+    group.add_argument(
+        "--cbfe-base-cost",
+        type=float,
+        default=8.0,
+        metavar="COST",
+        help="Fixed cost of a CBFE edge, on the scorer's scale (default: %(default)s).",
+    )
+    group.add_argument(
+        "--cbfe-atom-weight",
+        type=float,
+        default=0.05,
+        metavar="W",
+        help="Added to the CBFE base cost per heavy atom, summed over both ligands (default: %(default)s).",
+    )
+    group.add_argument(
         "--progress",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -309,5 +334,8 @@ def build_network_options(args: argparse.Namespace) -> NetworkOptions:
         show_progress=sys.stderr.isatty() if args.progress is None else args.progress,
         jobs=args.jobs,
         consistency=args.consistency,
+        cbfe_mode=args.cbfe,
+        cbfe_base_cost=args.cbfe_base_cost,
+        cbfe_atom_weight=args.cbfe_atom_weight,
         softcore=softcore,
     )

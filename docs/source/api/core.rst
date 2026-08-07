@@ -34,6 +34,8 @@ Pipeline
 
 .. automodule:: rbfenetmap.core.descriptors
 
+.. automodule:: rbfenetmap.core.cbfe
+
 Plugin registry
 ---------------
 

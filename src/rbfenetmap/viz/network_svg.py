@@ -14,10 +14,14 @@ from typing import TYPE_CHECKING, Sequence
 
 import networkx as nx
 
+from rbfenetmap.core.models import EdgeKind
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from rbfenetmap.core.models import Network
 
 __all__ = ("render_network_svg",)
+
+_CBFE = EdgeKind.CBFE.value
 
 
 def _normalize(positions: dict[str, tuple[float, float]]) -> dict[str, tuple[float, float]]:
@@ -135,6 +139,20 @@ def render_network_svg(
     heavier, so the reliable backbone of the network reads at a glance. Nodes not
     touched by any selected edge are drawn hollow, which makes an unconnected ligand
     visible rather than something the reader has to notice by counting.
+
+    Counterpoised edges are drawn violet, because they are a different experiment rather
+    than a more expensive version of the same one.
+
+    The particular violet is chosen, not decorative. It is the one hue region the report's
+    palette does not already spend on something else -- blue is nodes, orange is soft-core
+    and warnings, red is an unconnected ligand -- so it cannot be misread as any of those.
+    It is also the darkest of the candidates considered, at roughly half the relative
+    luminance of the ``#7f8fa6`` edge grey, which is what lets colour carry the distinction
+    on its own where the lighter violet this started as could not: that one sat within 10%
+    of the grey's luminance and needed a dash pattern to be separable at all.
+
+    Colour is still never the *only* signal. Every counterpoised edge says ``CBFE`` in its
+    tooltip, and its card in the report carries a badge.
     """
     graph = network.to_networkx()
     # Scale the canvas with the node count instead of fixing it: 48 ligands in the space
@@ -157,7 +175,12 @@ def render_network_svg(
         x, y = positions[node]
         return margin + x * inner_width, margin + (1.0 - y) * inner_height
 
-    costs = [data["weight"] for _, _, data in graph.edges(data=True)]
+    # Normalize the stroke scale over RBFE edges only. A CBFE edge is priced on a different
+    # scale entirely -- around 10 against 0.3 for a good relative edge -- so including them
+    # would stretch the range by an order of magnitude and flatten every RBFE edge to the
+    # same width, destroying the one thing this encoding is for. CBFE edges are drawn at the
+    # thinnest weight instead, which is honest: they are the expensive ones.
+    costs = [data["weight"] for _, _, data in graph.edges(data=True) if data.get("kind") != _CBFE]
     low, high = (min(costs), max(costs)) if costs else (0.0, 1.0)
     span = (high - low) or 1.0
 
@@ -166,6 +189,7 @@ def render_network_svg(
         f'width="{width}" height="{height}" font-family="system-ui, sans-serif">',
         "<style>"
         ".edge{stroke:#7f8fa6;stroke-linecap:round}"
+        ".edge-cbfe{stroke:#7c3aed}"
         ".node{fill:#4a90d9;stroke:#22384f;stroke-width:1.5}"
         ".node-isolated{fill:#ffffff;stroke:#c0392b;stroke-width:2}"
         ".label{font-size:12px;fill:#1c2733;text-anchor:middle}"
@@ -175,11 +199,15 @@ def render_network_svg(
     for source, target, data in graph.edges(data=True):
         x1, y1 = place(source)
         x2, y2 = place(target)
+        is_cbfe = data.get("kind") == _CBFE
         # Heavier stroke for a cheaper edge.
-        stroke = 1.0 + 3.5 * (1.0 - (data["weight"] - low) / span)
+        stroke = 1.0 if is_cbfe else 1.0 + 3.5 * (1.0 - (data["weight"] - low) / span)
+        css = "edge edge-cbfe" if is_cbfe else "edge"
+        label = "CBFE, cost" if is_cbfe else "cost"
         line = (
-            f'<line class="edge" x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
-            f'stroke-width="{stroke:.2f}"><title>{source} - {target}: cost {data["weight"]:.3f}</title></line>'
+            f'<line class="{css}" x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
+            f'stroke-width="{stroke:.2f}">'
+            f"<title>{source} - {target}: {label} {data['weight']:.3f}</title></line>"
         )
         href = _edge_href(source, target, edge_links)
         if href:

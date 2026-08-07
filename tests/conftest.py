@@ -20,7 +20,7 @@ from rbfenetmap.core.meta.exporters import AbstractExporter
 from rbfenetmap.core.meta.mappers import AbstractMapper
 from rbfenetmap.core.meta.planners import AbstractNetworkPlanner
 from rbfenetmap.core.meta.scorers import AbstractScorer
-from rbfenetmap.core.models import AtomMapping, EdgeScore, Ligand, Network, RejectionReason, Transformation
+from rbfenetmap.core.models import AtomMapping, EdgeKind, EdgeScore, Ligand, Network, RejectionReason, Transformation
 from rbfenetmap.core.options import MappingOptions, NetworkOptions
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "data"
@@ -196,18 +196,36 @@ def default_network_options() -> NetworkOptions:
 
 
 def make_transformation(
-    source: str, target: str, *, cost: float = 1.0, n_atoms: int = 4, feasible: bool = True
+    source: str,
+    target: str,
+    *,
+    cost: float = 1.0,
+    n_atoms: int = 4,
+    feasible: bool = True,
+    kind: EdgeKind = EdgeKind.RBFE,
 ) -> Transformation:
     """Build a minimal :class:`Transformation` for planner tests.
 
-    Carries no chemistry: the planner only reads endpoints, feasibility, and cost.
+    Carries no chemistry: the planner only reads endpoints, feasibility, and cost. A CBFE
+    *kind* forces the empty-core mapping that kind requires.
     """
-    mapping = AtomMapping.from_core_pairs(
-        {i: i for i in range(n_atoms)}, n_atoms_1=n_atoms, n_atoms_2=n_atoms, method="dummy"
-    )
+    if kind is EdgeKind.CBFE:
+        mapping = AtomMapping(
+            cc1=(),
+            cc2=(),
+            sc1=tuple(range(n_atoms)),
+            sc2=tuple(range(n_atoms)),
+            n_atoms_1=n_atoms,
+            n_atoms_2=n_atoms,
+            method="cbfe",
+        )
+    else:
+        mapping = AtomMapping.from_core_pairs(
+            {i: i for i in range(n_atoms)}, n_atoms_1=n_atoms, n_atoms_2=n_atoms, method="dummy"
+        )
     score = (
         EdgeScore(total=cost, feasible=True, scorer="dummy")
         if feasible
         else EdgeScore.rejected(RejectionReason.SOFTCORE_TOO_LARGE, scorer="dummy")
     )
-    return Transformation(source=source, target=target, mapping=mapping, score=score)
+    return Transformation(source=source, target=target, mapping=mapping, score=score, kind=kind)

@@ -69,6 +69,111 @@ When ``selection_objective="connectivity_then_cycles"``, candidate additions are
 by how many *new* ligands they place on a cycle, then by cycle length, then by cost.
 ``max_cycle_size`` can be used to ignore long loops and prefer triangles or 4-cycles.
 
+Counterpoised (CBFE) edges
+--------------------------
+
+A counterpoised binding free energy runs two absolute calculations simultaneously in
+opposite directions: one ligand decouples from the site as the other couples into it. It
+yields the same relative quantity an RBFE edge does, but **neither molecule is morphed into
+the other**, so there is no common core to find and no soft-core region to repair. A CBFE
+edge therefore cannot be infeasible, and it exists between *every* pair of ligands --
+including the pairs an MCS search cannot relate at all.
+
+That is what makes it useful here. The guarantee above is conditional on the feasible pool
+being connected, and on a real ligand series it often is not. With ``cbfe_mode`` set, the
+condition is discharged: the pool can no longer be too sparse to span.
+
+``off`` (default)
+   Never. Every edge is RBFE, and the behaviour is exactly as described above.
+
+``bridge``
+   Only to join subnetworks the feasible RBFE pool leaves disconnected. This is the mode
+   that turns the hard connectivity failure into a planned network.
+
+``cycles``
+   Everything ``bridge`` does, and additionally to put a ligand on a cycle when no RBFE
+   candidate can.
+
+``all``
+   The whole network is counterpoised. Mapping is skipped entirely -- no mapper is even
+   resolved -- which on a large series is the difference between minutes and milliseconds.
+
+The modes form a strict ladder, so raising the setting only ever adds possibilities.
+
+Eligibility is a gate, not a price
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This is the part most easily misread. ``cbfe_base_cost`` and ``cbfe_atom_weight`` put a
+CBFE edge on the same scale as the scorer's totals::
+
+   cost = cbfe_base_cost + cbfe_atom_weight * (n_heavy_1 + n_heavy_2)
+
+The default base, ``8.0``, is the linear scorer's charge-change ceiling: a CBFE edge is
+priced at roughly the most expensive thing that can happen to a still-feasible RBFE edge.
+Realistic totals land in ~[9, 13] against ~0.3 for a good relative edge and ~5-6 for a bad
+one.
+
+But cost only decides *which* CBFE edge is chosen among the ones the mode makes eligible,
+and orders RBFE against CBFE inside cycle closure. It never lets a CBFE edge outbid a
+feasible RBFE edge inside an already connected component: under ``bridge``, a CBFE edge
+that does not join two components is not in the pool at any price.
+
+Two consequences worth stating:
+
+- **Degree raising never spends a CBFE edge**, in any mode below ``all``. An extra edge on
+  an already connected, already cycled ligand is a refinement, and two absolute
+  calculations is not a trade anyone would make for one. A shortfall in
+  ``edges_per_ligand`` is still reported rather than quietly bought.
+- **Cycle closure prefers RBFE even when it is dearer.** Candidates are ranked by new
+  coverage, then by kind, then by cycle length and cost -- so an RBFE five-cycle beats a
+  counterpoised four-cycle.
+
+How bridges are chosen
+~~~~~~~~~~~~~~~~~~~~~~
+
+With *c* components, exactly *c - 1* bridges are needed, and choosing which is a maximum
+merit spanning selection over the component quotient graph::
+
+   merit = tanimoto + 0.5 * mean(centrality of the two endpoints)
+
+Similarity because a bridge between chemically close ligands is the one most likely to give
+a trustworthy number even run as two absolute calculations. Centrality -- degree within a
+ligand's *own* subnetwork, normalised to its most-connected member -- because a bridge
+landing on a hub propagates through the subnetwork and participates in cycles, whereas one
+landing on a leaf leaves a dangling path nothing checks. A singleton component scores 1.0
+rather than 0.0: it has exactly one way into the network, and ranking its only option last
+would be backwards.
+
+Interaction with adaptive evaluation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Adaptive evaluation does **not** stop earlier when CBFE is enabled, and that is deliberate.
+Its connectivity phase keys on the feasible *RBFE* graph, so it still exhausts every
+cross-component pair before giving up -- the only way to know RBFE cannot reach across a
+gap is to try, and ``bridge`` means "only where RBFE cannot reach".
+
+Conversely, the intermediate plans it uses to decide whether to keep expanding are probed
+with CBFE switched off. Left on, a ``cycles``-mode probe would satisfy
+``min_cycle_coverage`` with counterpoised edges, report no unmet constraints, and halt the
+search -- masking the shortfall and short-circuiting the very RBFE expansion the loop
+exists to drive.
+
+Downstream
+~~~~~~~~~~
+
+Every edge carries its kind through the JSON (``"kind": "rbfe" | "cbfe"``), the GraphML and
+edge-list exports, and the HTML report, where counterpoised edges are drawn violet and their
+cards report both ligands as fully decoupled rather than showing a common core of zero.
+The kind is never conveyed by colour alone: every counterpoised edge also carries ``CBFE``
+in its tooltip and a badge on its card.
+
+The Amber export writes ``rbfe/`` and ``cbfe/`` subdirectories, because amberstudio's
+``BuildEdges`` takes ``alchemical_mode`` per *invocation* rather than per edge: a mixed
+network is two ``BuildEdges`` runs, and the layout mirrors that. Each carries an
+``edges.txt`` in amberstudio's ``<src>~<dst>`` form. A CBFE edge needs nothing else --
+amberstudio builds its masks from the residue roles, since there is no mapping to convey --
+so ``cbfe/`` holds only the edge list. An all-RBFE network keeps the historical flat layout.
+
 Knob precedence
 ---------------
 
@@ -103,6 +208,10 @@ Knob precedence
      - ``max_softcore_atoms``
      - A **feasibility** knob applied during repair: it changes the candidate pool, not
        the selection. Tightening it can disconnect the pool, which then errors at (3).
+   * - 8
+     - ``cbfe_mode``
+     - Widens the pool rather than steering selection. Applied *before* cost competition,
+       so it can rescue (3) without ever displacing a feasible RBFE edge.
 
 Why the ``n_edges`` conflict is a hard error
 --------------------------------------------

@@ -4,16 +4,27 @@ Writes an ``edges.dat`` list plus one ``atommap_<src>~<dst>.runconfig`` YAML per
 the layout ``amberstudio``'s ``BuildEdges`` produces and ``guimapper`` edits. That file
 format is the interoperability contract between this package and the existing tooling:
 plan a network here, hand-edit any edge in guimapper, run it in amberstudio.
+
+Mixed RBFE/CBFE networks are written into ``rbfe/`` and ``cbfe/`` subdirectories, because
+``BuildEdges`` takes its ``alchemical_mode`` per *invocation* rather than per edge: a
+network containing both kinds is two ``BuildEdges`` runs, and the export mirrors that
+rather than producing a single directory neither run can consume. Each subdirectory also
+carries an ``edges.txt`` in amberstudio's own ``<src>~<dst>`` form. A CBFE edge needs
+nothing beyond that line -- amberstudio synthesizes its masks from the edge name, since
+there is no mapping to convey -- so ``cbfe/`` contains only the edge list.
+
+A network that is entirely RBFE keeps the flat, historical layout, so existing callers see
+no change.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Sequence
 
 from rbfenetmap.core.exceptions import ExporterError
 from rbfenetmap.core.meta.exporters import AbstractExporter
-from rbfenetmap.core.models import Network, Transformation
+from rbfenetmap.core.models import EDGE_SEPARATOR, EdgeKind, Network, Transformation
 from rbfenetmap.io.amber_masks import DEFAULT_RESIDUE_NAMES, build_amber_masks
 
 __all__ = ("AmberExporter",)
@@ -43,6 +54,8 @@ class AmberExporter(AbstractExporter):
         """
         problems: list[str] = []
         for edge in network.edges:
+            if edge.kind is EdgeKind.CBFE:
+                continue  # no mapping, therefore no masks to check
             try:
                 build_amber_masks(network.ligands[edge.source], network.ligands[edge.target], edge.mapping)
             except ExporterError as exc:
@@ -53,13 +66,15 @@ class AmberExporter(AbstractExporter):
             )
 
     def export(self, network: Network, destination: Path, **options: Any) -> tuple[Path, ...]:
-        """Write ``edges.dat`` and one runconfig per edge into *destination*.
+        """Write the edge lists and one runconfig per RBFE edge into *destination*.
 
         Parameters
         ----------
         network : Network
         destination : pathlib.Path
-            Directory, created if absent.
+            Directory, created if absent. A network with counterpoised edges is written
+            into ``rbfe/`` and ``cbfe/`` subdirectories of it; an all-RBFE network is
+            written flat, as before.
         **options
             ``residue_names`` -- the two residue names, default ``("SRC", "DST")``.
             ``aggregate`` -- also write a single ``atommaps.runconfig`` keyed by edge,
@@ -81,26 +96,58 @@ class AmberExporter(AbstractExporter):
 
         destination = Path(destination)
         destination.mkdir(parents=True, exist_ok=True)
+
+        rbfe_edges = network.rbfe_edges
+        cbfe_edges = network.cbfe_edges
+        split = bool(cbfe_edges)
         written: list[Path] = []
 
-        edges_path = destination / "edges.dat"
-        edges_path.write_text("\n".join(f"{e.source} {e.target}" for e in network.edges) + "\n")
-        written.append(edges_path)
+        rbfe_dir = destination / "rbfe" if split else destination
+        rbfe_dir.mkdir(parents=True, exist_ok=True)
+        written += self._write_edge_lists(rbfe_dir, rbfe_edges)
 
         payloads: dict[str, dict[str, Any]] = {}
-        for edge in network.edges:
+        for edge in rbfe_edges:
             payload = self._edge_payload(network, edge, residue_names)  # type: ignore[arg-type]
             payloads[edge.key] = payload
-            path = destination / f"atommap_{edge.key}{self.default_suffix}"
+            path = rbfe_dir / f"atommap_{edge.key}{self.default_suffix}"
             path.write_text(yaml.safe_dump(payload, sort_keys=False, default_flow_style=False))
             written.append(path)
 
         if aggregate:
-            path = destination / f"atommaps{self.default_suffix}"
+            path = rbfe_dir / f"atommaps{self.default_suffix}"
             path.write_text(yaml.safe_dump(payloads, sort_keys=False, default_flow_style=False))
             written.append(path)
 
+        if split:
+            # An edge list and nothing else. amberstudio's CBFE mode never loads the
+            # ligands and builds its masks from the residue roles alone, so a runconfig
+            # written here would carry no information and be overwritten regardless.
+            cbfe_dir = destination / "cbfe"
+            cbfe_dir.mkdir(parents=True, exist_ok=True)
+            written += self._write_edge_lists(cbfe_dir, cbfe_edges)
+
         return tuple(written)
+
+    @staticmethod
+    def _write_edge_lists(directory: Path, edges: Sequence[Transformation]) -> list[Path]:
+        """Write both edge-list spellings into *directory*.
+
+        ``edges.txt`` is what amberstudio reads: one ``<src>~<dst>`` per line, discovered
+        by prefix and suffix. ``edges.dat`` is the space-separated form this exporter has
+        always written, kept because downstream scripts parse it positionally and dropping
+        it would break them for no gain.
+        """
+        written: list[Path] = []
+
+        txt = directory / "edges.txt"
+        txt.write_text("".join(f"{e.source}{EDGE_SEPARATOR}{e.target}\n" for e in edges))
+        written.append(txt)
+
+        dat = directory / "edges.dat"
+        dat.write_text("".join(f"{e.source} {e.target}\n" for e in edges))
+        written.append(dat)
+        return written
 
     @staticmethod
     def _edge_payload(network: Network, edge: Transformation, residue_names: tuple[str, str]) -> dict[str, Any]:

@@ -13,6 +13,7 @@ import pytest
 
 from rbfenetmap.core.models import (
     AtomMapping,
+    EdgeKind,
     EdgeScore,
     Ligand,
     Network,
@@ -187,3 +188,52 @@ class TestTransformationAndNetwork:
         network = Network(ligands=benzamides, edges=(make_transformation("bza_H", "bza_F"),))
         with pytest.raises(ValueError, match="disconnected"):
             network.validate(require_connected=True)
+
+
+class TestEdgeKind:
+    def test_defaults_to_rbfe(self):
+        assert make_transformation("a", "b").kind is EdgeKind.RBFE
+
+    def test_a_cbfe_edge_may_not_claim_a_common_core(self):
+        """The invariant is one-way, and this is the direction that matters.
+
+        A CBFE edge with a common core is a mislabelled experiment that would export to a
+        runnable Amber input, so it is refused at construction.
+        """
+        mapping = AtomMapping.from_core_pairs({0: 0}, n_atoms_1=2, n_atoms_2=2, method="dummy")
+        with pytest.raises(ValueError, match="common core"):
+            Transformation(source="a", target="b", mapping=mapping, kind=EdgeKind.CBFE)
+
+    def test_an_rbfe_edge_with_an_empty_core_is_allowed(self):
+        """A mapper that found nothing is rejected on feasibility, not at construction."""
+        mapping = AtomMapping(cc1=(), cc2=(), sc1=(0, 1), sc2=(0, 1), n_atoms_1=2, n_atoms_2=2, method="dummy")
+        assert Transformation(source="a", target="b", mapping=mapping).kind is EdgeKind.RBFE
+
+    def test_reversed_preserves_the_kind(self):
+        edge = make_transformation("a", "b", kind=EdgeKind.CBFE)
+        assert edge.reversed().kind is EdgeKind.CBFE
+
+    def test_to_networkx_carries_the_kind(self, benzamides):
+        network = Network(
+            ligands=benzamides,
+            edges=(make_transformation("bza_H", "bza_F"), make_transformation("bza_F", "bza_Cl", kind=EdgeKind.CBFE)),
+        )
+        graph = network.to_networkx()
+        assert graph.edges["bza_H", "bza_F"]["kind"] == "rbfe"
+        assert graph.edges["bza_F", "bza_Cl"]["kind"] == "cbfe"
+
+    def test_rbfe_and_cbfe_edges_partition_the_selection(self, benzamides):
+        edges = (
+            make_transformation("bza_H", "bza_F"),
+            make_transformation("bza_F", "bza_Cl", kind=EdgeKind.CBFE),
+            make_transformation("bza_Cl", "bza_Me"),
+        )
+        network = Network(ligands=benzamides, edges=edges)
+        assert len(network.rbfe_edges) == 2
+        assert len(network.cbfe_edges) == 1
+        # By identity: a Transformation holds mappings and so is not hashable.
+        assert [e.key for e in (*network.rbfe_edges, *network.cbfe_edges)] == [
+            "bza_H~bza_F",
+            "bza_Cl~bza_Me",
+            "bza_F~bza_Cl",
+        ]

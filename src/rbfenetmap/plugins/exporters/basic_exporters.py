@@ -47,7 +47,9 @@ class EdgeListExporter(AbstractExporter):
         path.parent.mkdir(parents=True, exist_ok=True)
 
         separator = str(options.get("separator", " "))
-        lines = ["# source target cost n_softcore_1 n_softcore_2"]
+        # `kind` is appended rather than inserted so a consumer reading positional fields
+        # keeps reading the same values it always did.
+        lines = ["# source target cost n_softcore_1 n_softcore_2 kind"]
         lines += [
             separator.join(
                 (
@@ -56,6 +58,7 @@ class EdgeListExporter(AbstractExporter):
                     f"{edge.score.total:.6f}",
                     str(edge.mapping.n_softcore_1),
                     str(edge.mapping.n_softcore_2),
+                    edge.kind.value,
                 )
             )
             for edge in network.edges
@@ -94,6 +97,7 @@ class GraphMLExporter(AbstractExporter):
                 n_common_core=edge.mapping.n_common_core,
                 repaired=bool(edge.repair.applied),
                 method=edge.mapping.method,
+                kind=edge.kind.value,
             )
         nx.write_graphml(graph, path)
         return (path,)

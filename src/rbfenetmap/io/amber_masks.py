@@ -56,11 +56,19 @@ def build_amber_masks(
     Raises
     ------
     rbfenetmap.core.exceptions.ExporterError
-        If a soft-core atom name collides with a common-core atom name, or the mapping
-        violates Amber's linear-scaling constraint.
+        If the mapping has no common core, if a soft-core atom name collides with a
+        common-core atom name, or if the mapping violates Amber's linear-scaling
+        constraint.
 
     Notes
     -----
+    **Trap three: the empty core.** A mapping with no common core is what a counterpoised
+    (CBFE) edge carries, and left alone this function would happily turn it into
+    ``timask1=":SRC"``, ``scmask1=":SRC&@<every atom>"``. That is not a malformed file --
+    it is a *valid, runnable* single-topology RBFE in which both endpoints are entirely
+    soft-core, which will converge in ``pmemd`` and answer a different question than the
+    one asked, with nothing downstream to flag it. It is refused here rather than only in
+    the exporter so no future caller can reopen it.
     **Trap one: name collisions.** Amber soft-core masks select atoms *by name*, not by
     index. If a soft-core atom shares its name with a common-core atom in the same
     residue, the mask silently selects that core atom too, and the run proceeds with a
@@ -77,6 +85,14 @@ def build_amber_masks(
     because it is cheap, and because failing here with a clear message beats failing
     inside ``pmemd`` with an opaque one.
     """
+    if not mapping.cc1:
+        raise ExporterError(
+            f"{source.name} -> {target.name}: the mapping has no common core, so there is no relative "
+            "transformation to describe. Amber masks built from it would define a single-topology run "
+            "with both endpoints entirely soft-core -- runnable, and a different calculation than "
+            "intended. A counterpoised (CBFE) edge is set up from the edge name instead and needs no masks."
+        )
+
     residue_1, residue_2 = f":{residue_names[0]}", f":{residue_names[1]}"
     names_1 = source.atom_names
     names_2 = target.atom_names

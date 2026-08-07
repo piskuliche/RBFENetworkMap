@@ -20,12 +20,12 @@ rbfenet plan --ligands examples/data/benzamides.sdf \
 
 ```
 Planned 11 edge(s) over 9 ligand(s) -> network.json
-edge            cost   soft-core  core  repaired
---------------  -----  ---------  ----  --------
-bza_H~bza_F     0.240  1/1        15
-bza_H~bza_Me    0.305  1/4        15
+edge            kind  cost   soft-core  core  repaired
+--------------  ----  -----  ---------  ----  --------
+bza_H~bza_F     rbfe  0.240  1/1        15
+bza_H~bza_Me    rbfe  0.305  1/4        15
 ...
-bza_CF3~bza_Et  1.377  4/7        15    yes
+bza_CF3~bza_Et  rbfe  1.377  4/7        15    yes
 ```
 
 ## What it does
@@ -101,6 +101,7 @@ The feasible candidate graph is disconnected: 2 components.
 | `--selection-objective connectivity_then_cycles` | After the spanning network is built, prioritize putting as many ligands as possible onto at least one cycle before chasing uniform extra degree. |
 | `--max-cycle-size` | During cycle coverage, ignore candidate additions that would only make larger cycles than this. |
 | `--pair-evaluation adaptive` | Fingerprint-rank all pairs and run expensive mappings in batches until connectivity and redundancy targets are met. |
+| `--cbfe {off,bridge,cycles,all}` | Use counterpoised edges, which need no atom mapping and so are available between *any* two ligands. See below. |
 | `--progress` / `--no-progress` | Show or suppress pair-mapping progress. Interactive CLI runs show it automatically. |
 | `--forced-edge` / `--banned-edge` | Absolute. A forced edge bypasses scoring but not feasibility. |
 | `--max-softcore-atoms` | A *feasibility* knob: it changes the candidate pool, not the selection. |
@@ -110,6 +111,44 @@ The feasible candidate graph is disconnected: 2 components.
 Selection guarantees a spanning network **iff** the feasible candidate graph is
 connected: the MST is built first, the redundancy pass only ever adds, and conflicting
 budgets are rejected up front rather than by trimming the tree.
+
+## Counterpoised (CBFE) edges
+
+A CBFE edge is two absolute calculations run simultaneously in opposite directions — one
+ligand decoupling as the other couples. It gives the same relative quantity an RBFE edge
+does, but neither molecule is morphed into the other, so there is **no common core and no
+atom mapping**. It cannot be infeasible, and it exists between every pair of ligands —
+including the ones an MCS search cannot relate at all.
+
+That makes it the fix for the usual failure on a real series: a candidate pool that comes
+back in several disconnected pieces with no relative edge able to cross between them.
+
+```bash
+rbfenet plan --ligands ligands.sdf --cbfe bridge --out network.json
+```
+
+| mode | effect |
+|---|---|
+| `off` (default) | Never. Every edge is RBFE. |
+| `bridge` | Only to join subnetworks the feasible RBFE pool leaves disconnected — turning a hard connectivity failure into a planned network. Bridges are picked to maximize similarity *and* how well connected each endpoint is inside its own subnetwork. |
+| `cycles` | Everything `bridge` does, plus putting a ligand on a cycle when no RBFE candidate can. |
+| `all` | The whole network is counterpoised. Mapping is skipped entirely, so it returns in milliseconds where mapping takes minutes. |
+
+Cost is `--cbfe-base-cost + --cbfe-atom-weight * (n_heavy_1 + n_heavy_2)`, on the scorer's
+own scale. The default base of 8.0 is the linear scorer's charge-change ceiling — about
+the most expensive thing that can happen to a still-feasible RBFE edge — so CBFE never
+wins on price, only on being available where nothing else is.
+
+**Eligibility is a gate applied before cost competition.** Cost picks among the edges a
+mode makes eligible; it never lets a CBFE edge displace a feasible RBFE edge inside an
+already connected component. Two consequences: degree padding never spends a CBFE edge
+(an `edges_per_ligand` shortfall is still reported, not quietly bought), and cycle closure
+prefers an RBFE edge even when it is dearer.
+
+Every edge is marked in the JSON (`"kind"`), the GraphML and edge-list exports, and the
+HTML report, where counterpoised edges are drawn violet and their cards report both ligands
+as fully decoupled. The Amber export writes `rbfe/` and `cbfe/` subdirectories, because
+amberstudio's `BuildEdges` takes `alchemical_mode` per invocation rather than per edge.
 
 For a "connect everyone once, then put as many ligands as possible on at least one short
 cycle" workflow:

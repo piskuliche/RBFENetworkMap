@@ -14,11 +14,12 @@ from __future__ import annotations
 import html
 from typing import TYPE_CHECKING
 
+from rbfenetmap.core.models import EdgeKind
 from rbfenetmap.viz.depict import render_edge_svg
 from rbfenetmap.viz.network_svg import render_network_svg
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from rbfenetmap.core.models import Network
+    from rbfenetmap.core.models import Network, Transformation
 
 __all__ = ("render_report",)
 
@@ -51,6 +52,12 @@ th { font-weight: 600; }
 .legend span { display: inline-block; margin-right: 1rem; font-size: .85rem; }
 .swatch { display: inline-block; width: .8rem; height: .8rem; border-radius: 3px;
           vertical-align: -1px; margin-right: .3rem; }
+.rule { display: inline-block; width: 1.6rem; border-top: 2px solid #7f8fa6;
+        vertical-align: 4px; margin-right: .3rem; }
+.rule.cbfe { border-top-color: #7c3aed; }
+.badge { display: inline-block; font-size: .7rem; font-weight: 600; letter-spacing: .05em;
+         border-radius: 4px; padding: .05rem .35rem; vertical-align: 2px; margin-left: .4rem;
+         border: 1px solid #7c3aed; color: #7c3aed; }
 .warn { border-left: 3px solid #e08a3c; padding-left: .8rem; }
 """
 
@@ -63,6 +70,30 @@ def _escape(value: object) -> str:
 def _edge_anchor(key: str) -> str:
     """Return a stable fragment id for one edge section."""
     return f"edge-{key}"
+
+
+def _badge(edge: "Transformation") -> str:
+    """Return a CBFE marker for an edge heading, or nothing for an RBFE edge.
+
+    Only the exceptional kind is labelled. Badging both would double the visual noise on a
+    report where all but a handful of edges are relative.
+    """
+    return "<span class='badge'>CBFE</span>" if edge.kind is EdgeKind.CBFE else ""
+
+
+def _edge_summary(edge: "Transformation") -> str:
+    """Describe an edge's atom partition in the terms its kind actually uses.
+
+    A CBFE edge has an empty common core by construction, so reporting "common core 0"
+    would read as a broken RBFE edge rather than a correct counterpoised one. Say what is
+    happening instead: both ligands decoupled in full.
+    """
+    if edge.kind is EdgeKind.CBFE:
+        return f"{edge.mapping.n_atoms_1}/{edge.mapping.n_atoms_2} atoms fully decoupled &middot; no atom mapping"
+    return (
+        f"soft-core {edge.mapping.n_softcore_1}/{edge.mapping.n_softcore_2} &middot; "
+        f"common core {edge.mapping.n_common_core}"
+    )
 
 
 def render_report(network: "Network", *, title: str = "RBFE network", show_indices: bool = False) -> str:
@@ -81,20 +112,38 @@ def render_report(network: "Network", *, title: str = "RBFE network", show_indic
     """
     rejected = network.rejected
     repaired = [e for e in network.edges if e.repair.applied]
+    cbfe_edges = network.cbfe_edges
     selected_edges = sorted(network.edges, key=lambda e: e.score.total)
     edge_links = {edge.unordered_key: f"#{_edge_anchor(edge.key)}" for edge in selected_edges}
+
+    intro = (
+        "<p class='intro'>Selected edges are shown below with both ligands drawn side by side. "
+        "The warm highlight is the soft-core region that changes during the transformation; "
+        "the cool highlight is the common core that stays fixed."
+    )
+    if cbfe_edges:
+        intro += (
+            " Counterpoised (CBFE) edges are marked separately: they run two absolute calculations in "
+            "opposite directions rather than morphing one ligand into the other, so both molecules are "
+            "entirely soft-core and there is no common core to show."
+        )
+    intro += "</p>"
 
     parts = [
         "<!doctype html><html><head><meta charset='utf-8'>",
         "<meta name='viewport' content='width=device-width, initial-scale=1'>",
         f"<title>{_escape(title)}</title><style>{_CSS}</style></head><body>",
         f"<h1>{_escape(title)}</h1>",
-        "<p class='intro'>Selected edges are shown below with both ligands drawn side by side. "
-        "The warm highlight is the soft-core region that changes during the transformation; "
-        "the cool highlight is the common core that stays fixed.</p>",
+        intro,
         "<div class='summary'>",
         f"<div class='stat'><div class='value'>{len(network.ligands)}</div><div class='label'>Ligands</div></div>",
         f"<div class='stat'><div class='value'>{len(network.edges)}</div><div class='label'>Edges</div></div>",
+    ]
+    if cbfe_edges:
+        parts.append(
+            f"<div class='stat'><div class='value'>{len(cbfe_edges)}</div><div class='label'>CBFE edges</div></div>"
+        )
+    parts += [
         f"<div class='stat'><div class='value'>{len(repaired)}</div><div class='label'>Repaired</div></div>",
         f"<div class='stat'><div class='value'>{len(rejected)}</div><div class='label'>Rejected</div></div>",
         f"<div class='stat'><div class='value'>{_escape(network.planner)}</div><div class='label'>Planner</div></div>",
@@ -111,22 +160,27 @@ def render_report(network: "Network", *, title: str = "RBFE network", show_indic
         "<div class='scroll'>",
         render_network_svg(network, edge_links=edge_links),
         "</div>",
-        "<p class='meta'>Thicker edges are cheaper. Hollow red nodes are unconnected. Click a network edge or the index below to jump to its transformation card.</p>",
+        "<p class='meta'>Thicker edges are cheaper. Hollow red nodes are unconnected. "
+        + ("Violet edges are counterpoised (CBFE). " if cbfe_edges else "")
+        + "Click a network edge or the index below to jump to its transformation card.</p>",
         "<h2>Selected edges</h2>",
         "<div class='legend'>",
         "<span><span class='swatch' style='background:#f58c52'></span>soft-core (transformed)</span>",
         "<span><span class='swatch' style='background:#8cbfeb'></span>common core (held fixed)</span>",
-        "</div>",
     ]
+    if cbfe_edges:
+        parts += [
+            "<span><span class='rule'></span>RBFE edge</span>",
+            "<span><span class='rule cbfe'></span>CBFE edge (counterpoised)</span>",
+        ]
+    parts.append("</div>")
 
     if selected_edges:
         parts.append("<div class='edge-index'>")
         for edge in selected_edges:
             parts.append(
-                f"<a href='#{_edge_anchor(edge.key)}'><strong>{_escape(edge.key)}</strong>"
-                f"<span class='meta'>cost {edge.score.total:.3f} &middot; soft-core "
-                f"{edge.mapping.n_softcore_1}/{edge.mapping.n_softcore_2} &middot; "
-                f"core {edge.mapping.n_common_core}</span></a>"
+                f"<a href='#{_edge_anchor(edge.key)}'><strong>{_escape(edge.key)}{_badge(edge)}</strong>"
+                f"<span class='meta'>cost {edge.score.total:.3f} &middot; {_edge_summary(edge)}</span></a>"
             )
         parts.append("</div>")
 
@@ -134,10 +188,9 @@ def render_report(network: "Network", *, title: str = "RBFE network", show_indic
         source_svg, target_svg = render_edge_svg(edge, network.ligands, show_indices=show_indices)
         parts += [
             f"<div class='edge' id='{_edge_anchor(edge.key)}'>",
-            f"<h3>{_escape(edge.key)}</h3>",
-            f"<div class='meta'>cost {edge.score.total:.3f} &middot; soft-core "
-            f"{edge.mapping.n_softcore_1}/{edge.mapping.n_softcore_2} &middot; common core "
-            f"{edge.mapping.n_common_core} &middot; mapper {_escape(edge.mapping.method)}</div>",
+            f"<h3>{_escape(edge.key)}{_badge(edge)}</h3>",
+            f"<div class='meta'>cost {edge.score.total:.3f} &middot; {_edge_summary(edge)} &middot; "
+            f"{'protocol' if edge.kind is EdgeKind.CBFE else 'mapper'} {_escape(edge.mapping.method)}</div>",
             f"<div class='panes scroll'>{source_svg}{target_svg}</div>",
         ]
         if edge.repair.applied:

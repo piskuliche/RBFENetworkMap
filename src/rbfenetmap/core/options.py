@@ -13,6 +13,7 @@ from typing import Literal
 from rbfenetmap.core.models import EDGE_SEPARATOR, parse_edge_key
 
 __all__ = (
+    "CBFEMode",
     "ChargeChangePolicy",
     "CorePruningPolicy",
     "EdgeDirection",
@@ -32,6 +33,12 @@ PairStrategy = Literal["all_unordered_pairs", "all_pairs", "star", "linear", "ex
 EdgeDirection = Literal["fewer_softcore_first", "lexicographic", "heavier_second"]
 SelectionObjective = Literal["uniform_redundancy", "connectivity_then_cycles"]
 PairEvaluation = Literal["eager", "adaptive"]
+CBFEMode = Literal["off", "bridge", "cycles", "all"]
+
+#: Ordered from least to most CBFE usage. ``cycles`` includes everything ``bridge`` does,
+#: so a mode's position in this tuple is what the planner tests against rather than a
+#: chain of equality checks that would drift as modes are added.
+CBFE_MODES: tuple[CBFEMode, ...] = ("off", "bridge", "cycles", "all")
 
 
 def normalize_edge_specs(specs: tuple[str, ...] | list[str] | None) -> frozenset[tuple[str, str]]:
@@ -251,6 +258,37 @@ class NetworkOptions:
         Worker processes used for mapping and scoring.
     consistency : {"pairwise", "graph"}
         ``"graph"`` additionally intersects each ligand's core across all its edges.
+    cbfe_mode : {"off", "bridge", "cycles", "all"}
+        How freely the planner may spend counterpoised (CBFE) edges. A CBFE edge needs no
+        atom mapping, so it is available between *any* two ligands -- including the pairs
+        an MCS search cannot relate -- at the price of two absolute calculations.
+
+        - ``"off"`` -- never. Every edge is RBFE.
+        - ``"bridge"`` -- only to join subnetworks the feasible RBFE pool leaves
+          disconnected. This is the mode that turns a hard connectivity failure into a
+          planned network.
+        - ``"cycles"`` -- everything ``"bridge"`` does, and additionally to put ligands on
+          a cycle when no RBFE candidate can.
+        - ``"all"`` -- the whole network is CBFE. Mapping is skipped entirely.
+
+        The modes form a strict ladder, so raising the setting only ever adds
+        possibilities.
+
+        **Eligibility is a gate applied before cost competition, and this is the point
+        most easily misread.** ``cbfe_base_cost`` decides *which* CBFE edge is chosen
+        among the ones the mode makes eligible, and orders RBFE against CBFE inside cycle
+        closure. It never lets a CBFE edge outbid a feasible RBFE edge inside an already
+        connected component: under ``"bridge"`` a CBFE edge that does not join two
+        components is not in the pool at all, at any price.
+    cbfe_base_cost : float
+        Fixed cost of a CBFE edge, on the same scale as the scorer's edge totals. The
+        default sits at the linear scorer's charge-change ceiling -- a CBFE edge costs
+        about what the most expensive thing that can happen to a still-feasible RBFE edge
+        costs -- so CBFE never wins on price alone, only on availability.
+    cbfe_atom_weight : float
+        Added to ``cbfe_base_cost`` for each heavy atom summed over both ligands. A
+        counterpoised calculation decouples both molecules in full, so its expense scales
+        with how much there is to decouple.
     softcore : SoftcorePolicy
         Feasibility policy handed to the repair.
 
@@ -282,6 +320,9 @@ class NetworkOptions:
     show_progress: bool = False
     jobs: int = 1
     consistency: Literal["pairwise", "graph"] = "pairwise"
+    cbfe_mode: CBFEMode = "off"
+    cbfe_base_cost: float = 8.0
+    cbfe_atom_weight: float = 0.05
     softcore: SoftcorePolicy = field(default_factory=SoftcorePolicy)
 
     def __post_init__(self) -> None:
@@ -312,6 +353,12 @@ class NetworkOptions:
             raise ValueError("adaptive_batch_size must be at least 1.")
         if self.jobs < 1:
             raise ValueError("jobs must be at least 1.")
+        if self.cbfe_mode not in CBFE_MODES:
+            raise ValueError(f"cbfe_mode must be one of {list(CBFE_MODES)}; got {self.cbfe_mode!r}.")
+        if self.cbfe_base_cost < 0:
+            raise ValueError("cbfe_base_cost must not be negative.")
+        if self.cbfe_atom_weight < 0:
+            raise ValueError("cbfe_atom_weight must not be negative.")
         if self.pair_strategy == "star" and not self.hub:
             raise ValueError("pair_strategy='star' requires a hub ligand.")
         if self.pair_strategy == "explicit" and not self.explicit_pairs:
@@ -326,6 +373,16 @@ class NetworkOptions:
     def banned_pairs(self) -> frozenset[tuple[str, str]]:
         """Banned edges as unordered endpoint pairs."""
         return normalize_edge_specs(self.banned_edges)
+
+    @property
+    def cbfe_bridges_components(self) -> bool:
+        """Whether CBFE edges may join otherwise-disconnected subnetworks."""
+        return self.cbfe_mode in ("bridge", "cycles")
+
+    @property
+    def cbfe_closes_cycles(self) -> bool:
+        """Whether CBFE edges may be spent putting ligands on a cycle."""
+        return self.cbfe_mode == "cycles"
 
     def check_edge_budget(self, n_ligands: int) -> None:
         """Verify ``n_edges`` can support a spanning network over *n_ligands*.
@@ -342,6 +399,11 @@ class NetworkOptions:
         ``n_edges`` would produce a disconnected network the user explicitly forbade;
         quietly raising ``n_edges`` would ignore a budget the user explicitly set. Only
         the user can say which they meant.
+
+        With ``cbfe_mode`` bridging enabled this becomes the *only* way a spanning network
+        can fail. A CBFE edge exists between every pair, so the candidate pool can no
+        longer be too sparse to connect the ligands -- only an edge budget below
+        ``n_ligands - 1``, or a ban on every bridging pair, can prevent it.
         """
         if self.n_edges is None or not self.require_connected or n_ligands < 2:
             return

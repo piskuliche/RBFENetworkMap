@@ -9,6 +9,26 @@ tree edge.
 Because the second stage only adds, connectivity established in the first stage cannot be
 lost. That is also why an ``n_edges`` smaller than ``n_ligands - 1`` is rejected up front
 rather than honoured by trimming: trimming would break the guarantee.
+
+Counterpoised (CBFE) edges
+--------------------------
+When ``cbfe_mode`` is not ``"off"`` the guarantee gets stronger rather than weaker: a CBFE
+edge exists between every pair of ligands, so the feasible pool can no longer be too sparse
+to span. What the mode controls is not whether the stages read CBFE edges but *when those
+edges enter the graph*, at three ordered points in :meth:`MSTRedundancyPlanner.plan`:
+
+1. forced pairs that only CBFE can supply -- before the spanning pass, so the pre-seed
+   loop can find them;
+2. the bridges chosen by :func:`~rbfenetmap.core.cbfe.select_cbfe_bridges` -- also before
+   the spanning pass, and before the connectivity check, which is what turns a hard
+   disconnection failure into a planned network;
+3. the rest of the pool -- *after* the spanning pass, so cycle closure can reach it while
+   the degree-raising pass cannot.
+
+Expressing eligibility as presence rather than as a predicate threaded through three
+methods is what keeps the stages themselves unchanged. The one place the distinction is
+read directly is cycle-closure ranking, which prefers an RBFE edge over a CBFE edge that
+would buy the same coverage.
 """
 
 from __future__ import annotations
@@ -18,10 +38,11 @@ from typing import ClassVar, Mapping, Sequence
 
 import networkx as nx
 
+from rbfenetmap.core.cbfe import build_cbfe_pool, make_cbfe_transformation, select_cbfe_bridges
 from rbfenetmap.core.exceptions import NetworkPlanError
 from rbfenetmap.core.meta.planners import AbstractNetworkPlanner
-from rbfenetmap.core.models import EDGE_SEPARATOR, Ligand, Network, Transformation
-from rbfenetmap.core.options import NetworkOptions
+from rbfenetmap.core.models import EDGE_SEPARATOR, EdgeKind, Ligand, Network, Transformation
+from rbfenetmap.core.options import CBFEMode, NetworkOptions
 
 __all__ = ("MSTRedundancyPlanner",)
 
@@ -40,7 +61,13 @@ def _best_by_pair(candidates: Sequence[Transformation]) -> dict[tuple[str, str],
 
 
 def _orient(edge: Transformation, ligands: Mapping[str, Ligand], direction: str) -> Transformation:
-    """Return *edge* oriented per *direction*."""
+    """Return *edge* oriented per *direction*.
+
+    For a CBFE edge every atom is soft-core, so ``fewer_softcore_first`` degenerates to
+    "smaller ligand first". That is still the convention one wants -- the source is the
+    molecule being decoupled from the site -- but it is arrived at by a different route
+    than the rationale below describes, which is worth knowing before touching this.
+    """
     if direction == "lexicographic":
         return edge if edge.source < edge.target else edge.reversed()
     if direction == "heavier_second":
@@ -60,7 +87,7 @@ def _charge_classes(ligands: Mapping[str, Ligand]) -> dict[int, list[str]]:
 
 
 def _describe_disconnection(
-    graph: nx.Graph, ligands: Mapping[str, Ligand], candidates: Sequence[Transformation]
+    graph: nx.Graph, ligands: Mapping[str, Ligand], candidates: Sequence[Transformation], *, cbfe_mode: CBFEMode = "off"
 ) -> str:
     """Build an actionable message explaining why the pool is disconnected.
 
@@ -68,6 +95,13 @@ def _describe_disconnection(
     gap along with its reason. "Disconnected" alone tells a user nothing they can act on;
     "these two groups are only joined by edges rejected for soft-core size" tells them
     exactly which knob to loosen.
+
+    The closing advice depends on *cbfe_mode*. With CBFE bridging enabled, the soft-core
+    budget cannot be the cause -- a CBFE bridge does not use one -- so recommending that
+    the user loosen it would send them after the wrong knob. Reaching this message at all
+    then means every pair that could have crossed a gap was banned, and that is what the
+    message says instead. The rejected-candidate listing above stays useful either way: it
+    still explains why no *RBFE* bridge was available.
     """
     components = [sorted(c) for c in nx.connected_components(graph)]
     lines = [f"The feasible candidate graph is disconnected: {len(components)} components."]
@@ -94,6 +128,14 @@ def _describe_disconnection(
             reasons = ", ".join(r.value for r in candidate.score.rejections) or "unknown"
             lines.append(f"    {candidate.key} (components {a + 1}/{b + 1}): {reasons}")
 
+    if cbfe_mode in ("bridge", "cycles"):
+        lines.append(
+            f"  cbfe_mode={cbfe_mode!r} is set, so a CBFE edge could have joined these components without "
+            "any mapping at all. Reaching this point means every remaining cross-component pair is in "
+            "banned_edges -- remove one of those bans, or pass require_connected=False."
+        )
+        return "\n".join(lines)
+
     classes = _charge_classes(ligands)
     if len(classes) > 1:
         summary = {charge: names[:4] for charge, names in sorted(classes.items())}
@@ -101,7 +143,10 @@ def _describe_disconnection(
             f"  Note: the ligands span several net charges {summary}. If charge_change_policy is "
             "'reject', no edge can cross those classes -- use 'penalize', or plan each class separately."
         )
-    lines.append("  Loosen the soft-core budget, or pass require_connected=False to plan each component.")
+    lines.append(
+        "  Loosen the soft-core budget, set cbfe_mode='bridge' to join the components with "
+        "counterpoised edges, or pass require_connected=False to plan each component."
+    )
     return "\n".join(lines)
 
 
@@ -109,6 +154,7 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
     """Select a spanning network, then add redundancy up to the user's targets."""
 
     name: ClassVar[str] = "mst"
+    supports_cbfe: ClassVar[bool] = True
 
     def plan(
         self, ligands: Mapping[str, Ligand], candidates: Sequence[Transformation], options: NetworkOptions
@@ -118,7 +164,7 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
         Raises
         ------
         rbfenetmap.core.exceptions.NetworkPlanError
-            If a forced edge is infeasible, ``n_edges`` cannot span the ligands, or the
+            If a forced edge is unavailable, ``n_edges`` cannot span the ligands, or the
             feasible pool is disconnected while connectivity is required.
         """
         names = list(ligands)
@@ -128,23 +174,66 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
         banned = options.banned_pairs
         feasible = {pair: edge for pair, edge in feasible.items() if pair not in banned}
 
-        self._check_forced(options, feasible, candidates)
+        # Costs only; the transformations are built for the handful of pairs that survive
+        # selection. Excluding the pairs that already have an RBFE edge here, once, is what
+        # stops a pair being offered as both kinds and duplicating in the final network.
+        cbfe_pool: dict[tuple[str, str], float] = {}
+        if options.cbfe_bridges_components:
+            cbfe_pool = build_cbfe_pool(ligands, options, exclude=feasible.keys())
+
+        unmet: list[str] = []
+        self._check_forced(options, feasible, candidates, cbfe_available=frozenset(cbfe_pool))
 
         graph: nx.Graph = nx.Graph()
         graph.add_nodes_from(names)
         for pair, edge in feasible.items():
-            graph.add_edge(pair[0], pair[1], weight=edge.score.total)
+            graph.add_edge(pair[0], pair[1], weight=edge.score.total, kind=EdgeKind.RBFE.value)
 
-        unmet: list[str] = []
+        def adopt(pair: tuple[str, str]) -> None:
+            """Move one pair out of the pool and onto the graph as a CBFE edge.
+
+            Popping is what stops an already-placed bridge being offered a second time to
+            the cycle-closure pool in step (3).
+            """
+            graph.add_edge(pair[0], pair[1], weight=cbfe_pool.pop(pair), kind=EdgeKind.CBFE.value)
+
+        # (1) Forced pairs that only CBFE can supply. This must happen before
+        # _spanning_edges, whose pre-seed loop skips any pair the graph does not already
+        # have -- a forced edge would otherwise vanish without a word.
+        for pair in sorted(options.forced_pairs & set(cbfe_pool)):
+            adopt(pair)
+            spec = f"{pair[0]}{EDGE_SEPARATOR}{pair[1]}"
+            unmet.append(f"forced edge {spec} has no feasible RBFE mapping; supplied as a CBFE edge")
+
+        # (2) Bridges, before the connectivity check below, which is what lets a pool that
+        # would have been a hard failure become a planned network.
+        if options.cbfe_bridges_components:
+            for pair in select_cbfe_bridges(graph, ligands, cbfe_pool):
+                adopt(pair)
+
         if len(names) > 1 and not nx.is_connected(graph):
             if options.require_connected:
-                raise NetworkPlanError(_describe_disconnection(graph, ligands, candidates))
+                raise NetworkPlanError(_describe_disconnection(graph, ligands, candidates, cbfe_mode=options.cbfe_mode))
             unmet.append(f"network is disconnected ({nx.number_connected_components(graph)} components)")
 
         selected = self._spanning_edges(graph, options)
+
+        # (3) The rest of the pool, after the spanning tree is fixed. Cycle closure may
+        # spend these; the degree-raising pass filters them back out.
+        if options.cbfe_closes_cycles:
+            for pair in sorted(cbfe_pool):
+                graph.add_edge(pair[0], pair[1], weight=cbfe_pool[pair], kind=EdgeKind.CBFE.value)
+
         selected = self._add_redundancy(graph, selected, options, unmet)
 
-        edges = tuple(_orient(feasible[pair], ligands, options.edge_direction) for pair in sorted(selected))
+        def chosen(pair: tuple[str, str]) -> Transformation:
+            """Materialize the transformation behind a selected pair."""
+            edge = feasible.get(pair)
+            if edge is not None:
+                return edge
+            return make_cbfe_transformation(ligands[pair[0]], ligands[pair[1]], options)
+
+        edges = tuple(_orient(chosen(pair), ligands, options.edge_direction) for pair in sorted(selected))
         network = Network(
             ligands=ligands,
             edges=edges,
@@ -161,17 +250,32 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
         options: NetworkOptions,
         feasible: Mapping[tuple[str, str], Transformation],
         candidates: Sequence[Transformation],
+        *,
+        cbfe_available: frozenset[tuple[str, str]] = frozenset(),
     ) -> None:
         """Raise if any forced edge is unavailable.
 
         A forced edge bypasses *scoring* but not *feasibility*. Silently dropping one
         would hand back a network missing an edge the user explicitly demanded, with no
         indication anything went wrong.
+
+        Parameters
+        ----------
+        options : NetworkOptions
+        feasible : Mapping[tuple[str, str], Transformation]
+            The post-ban RBFE pool.
+        candidates : Sequence[Transformation]
+            Used to quote the rejection reason for a forced pair that was scored.
+        cbfe_available : frozenset[tuple[str, str]], optional
+            Pairs a CBFE edge could supply. These satisfy the constraint, so they are not
+            problems -- but the caller still records the substitution, because being handed
+            a counterpoised calculation where a relative one was demanded is a change the
+            user needs to see.
         """
         by_pair = {c.unordered_key: c for c in candidates}
         problems: list[str] = []
         for pair in sorted(options.forced_pairs):
-            if pair in feasible:
+            if pair in feasible or pair in cbfe_available:
                 continue
             candidate = by_pair.get(pair)
             spec = f"{pair[0]}{EDGE_SEPARATOR}{pair[1]}"
@@ -183,7 +287,8 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
         if problems:
             raise NetworkPlanError(
                 "Forced edge(s) cannot be used:\n  " + "\n  ".join(problems) + "\nLoosen the soft-core "
-                "budget for these pairs, or remove them from forced_edges."
+                "budget for these pairs, set cbfe_mode to supply them as counterpoised edges, or remove "
+                "them from forced_edges."
             )
 
     def _spanning_edges(self, graph: nx.Graph, options: NetworkOptions) -> set[tuple[str, str]]:
@@ -227,12 +332,20 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
         """Greedily add cheap edges to raise degrees and close cycles.
 
         Strictly additive, so the spanning property established upstream survives.
+
+        The two passes are handed *different* pools, and that is the whole of the
+        ``cycles`` mode gate. Cycle closure may reach for a CBFE edge, because putting a
+        ligand on a cycle is what makes its free energy checkable and there may be no other
+        way to do it. Degree raising may not: an extra edge on an already-connected,
+        already-cycled ligand is a refinement, and spending two absolute calculations on a
+        refinement is not a trade anyone would make deliberately.
         """
         selected = set(selected)
         available = sorted(
             (tuple(sorted((u, v))) for u, v in graph.edges if tuple(sorted((u, v))) not in selected),
             key=lambda pair: (graph.edges[pair]["weight"], pair),
         )
+        degree_available = [pair for pair in available if graph.edges[pair]["kind"] != EdgeKind.CBFE.value]
 
         def at_cap() -> bool:
             """Whether the edge budget is exhausted."""
@@ -243,13 +356,13 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
 
         if options.selection_objective == "connectivity_then_cycles":
             if options.min_cycle_coverage > 0:
-                selected = self._close_cycles(graph, selected, options, unmet)
+                selected = self._close_cycles(graph, available, selected, options, unmet)
             if options.edges_per_ligand > 1:
-                selected = self._raise_degrees(graph, available, selected, options, unmet)
+                selected = self._raise_degrees(graph, degree_available, selected, options, unmet)
         else:
-            selected = self._raise_degrees(graph, available, selected, options, unmet)
+            selected = self._raise_degrees(graph, degree_available, selected, options, unmet)
             if options.min_cycle_coverage > 0:
-                selected = self._close_cycles(graph, selected, options, unmet)
+                selected = self._close_cycles(graph, available, selected, options, unmet)
 
         return selected
 
@@ -298,9 +411,18 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
         return selected
 
     def _close_cycles(
-        self, graph: nx.Graph, selected: set[tuple[str, str]], options: NetworkOptions, unmet: list[str]
+        self,
+        graph: nx.Graph,
+        available: Sequence[tuple[str, str]],
+        selected: set[tuple[str, str]],
+        options: NetworkOptions,
+        unmet: list[str],
     ) -> set[tuple[str, str]]:
-        """Add cheap edges until enough ligands lie on a cycle."""
+        """Add cheap edges until enough ligands lie on a cycle.
+
+        *available* is the cost-ordered pool of unselected pairs, computed once by the
+        caller. It includes CBFE edges when ``cbfe_mode`` allows cycle closure to use them.
+        """
         selected = set(selected)
 
         def covered(current: set[tuple[str, str]]) -> set[str]:
@@ -322,10 +444,6 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
             return selected  # a cycle needs three vertices
 
         target = options.min_cycle_coverage * total
-        available = sorted(
-            (tuple(sorted((u, v))) for u, v in graph.edges if tuple(sorted((u, v))) not in selected),
-            key=lambda pair: (graph.edges[pair]["weight"], pair),
-        )
 
         def cycle_size_if_added(current: set[tuple[str, str]], pair: tuple[str, str]) -> int | None:
             """Return the cycle length created by adding *pair*, or ``None`` if none."""
@@ -339,8 +457,15 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
 
         def rank(
             pair: tuple[str, str], current_covered: set[str]
-        ) -> tuple[float, float, float, tuple[str, str]] | None:
-            """Rank a candidate edge by new cycle coverage, then shortness, then cost."""
+        ) -> tuple[float, float, float, float, tuple[str, str]] | None:
+            """Rank a candidate edge by new coverage, kind, shortness, then cost.
+
+            The kind term sits between coverage and cycle size deliberately. Cost already
+            carries the CBFE penalty, so this is not about price -- it is about provenance:
+            two edges that put the same ligands on a cycle should resolve to the one that
+            does not need a second simulation protocol, and an RBFE five-cycle is worth
+            more than a counterpoised four-cycle.
+            """
             cycle_size = cycle_size_if_added(selected, pair)
             if cycle_size is None:
                 return None
@@ -351,17 +476,28 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
             gained = len(covered(expanded) - current_covered)
             if gained <= 0:
                 return None
-            return (-gained, cycle_size, graph.edges[pair]["weight"], pair)
+            is_cbfe = float(graph.edges[pair]["kind"] == EdgeKind.CBFE.value)
+            return (-gained, is_cbfe, cycle_size, graph.edges[pair]["weight"], pair)
 
         while len(covered(selected)) < target:
             if options.n_edges is not None and len(selected) >= options.n_edges:
                 break
             current_covered = covered(selected)
-            ranked = [
-                item
-                for item in (rank(pair, current_covered) for pair in available if pair not in selected)
-                if item is not None
+            # A CBFE edge is only worth spending on a ligand that has no other route onto a
+            # cycle, so restrict that half of the pool to pairs with an uncovered endpoint.
+            # This is the intent stated directly, and it also keeps `rank` -- which builds
+            # two scratch graphs per candidate -- off the quadratic CBFE pool.
+            considered = [
+                pair
+                for pair in available
+                if pair not in selected
+                and (
+                    graph.edges[pair]["kind"] != EdgeKind.CBFE.value
+                    or pair[0] not in current_covered
+                    or pair[1] not in current_covered
+                )
             ]
+            ranked = [item for item in (rank(pair, current_covered) for pair in considered) if item is not None]
             chosen = min(ranked)[-1] if ranked else None
             if chosen is None:
                 break

@@ -5,6 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import ClassVar, Mapping, Sequence
 
+from rbfenetmap.core.exceptions import NetworkPlanError
 from rbfenetmap.core.models import Ligand, Network, Transformation
 from rbfenetmap.core.options import NetworkOptions
 
@@ -28,6 +29,38 @@ class AbstractNetworkPlanner(ABC):
     """
 
     name: ClassVar[str] = "abstract"
+
+    #: Whether this planner knows how to place counterpoised (CBFE) edges. Both of the
+    #: modes that need planner cooperation -- ``bridge`` and ``cycles`` -- are expressed as
+    #: decisions about *where* an edge goes, which only a planner that reasons about
+    #: components and cycles can make. ``all`` needs nothing from the planner, because the
+    #: pipeline hands it a pool that is already entirely CBFE.
+    supports_cbfe: ClassVar[bool] = False
+
+    def check_cbfe_support(self, options: NetworkOptions) -> None:
+        """Raise if *options* asks for CBFE placement this planner cannot do.
+
+        Parameters
+        ----------
+        options : NetworkOptions
+
+        Raises
+        ------
+        rbfenetmap.core.exceptions.NetworkPlanError
+
+        Notes
+        -----
+        Called rather than silently ignored. A user who passes ``--cbfe bridge`` and a
+        planner that cannot honour it would otherwise get a disconnected network, or a
+        connectivity error, with nothing to connect either outcome to the flag they set --
+        the same failure mode the scorers refuse for an unknown weight name.
+        """
+        if self.supports_cbfe or not options.cbfe_bridges_components:
+            return
+        raise NetworkPlanError(
+            f"Planner {self.name!r} cannot place CBFE edges, but cbfe_mode={options.cbfe_mode!r} requires it. "
+            "Use the 'mst' planner, or cbfe_mode='all' (which needs no planner support), or 'off'."
+        )
 
     @abstractmethod
     def plan(

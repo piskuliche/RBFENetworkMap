@@ -29,6 +29,12 @@ dependencies = [
   "scipy>=1.10",
 ]
 
+[project.urls]
+Homepage = "https://github.com/piskuliche/RBFENetworkMap"
+Documentation = "https://piskuliche.github.io/RBFENetworkMap/"
+Repository = "https://github.com/piskuliche/RBFENetworkMap"
+Issues = "https://github.com/piskuliche/RBFENetworkMap/issues"
+
 [project.scripts]
 rbfenet = "rbfenetmap.cli.main:main"
 

@@ -2,6 +2,8 @@
 
 Plan Relative Binding Free Energy perturbation networks from RDKit molecules.
 
+Documentation: <https://piskuliche.github.io/RBFENetworkMap/>
+
 Give it a series of ligands; it returns a scored, tunable network of alchemical
 transformations, each carrying a common-core / soft-core partition that satisfies the
 constraints the package is built around: **a transformation has at most one connected

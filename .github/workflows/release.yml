@@ -1,0 +1,66 @@
+name: Release
+
+# Publishing is driven by the tag, so the released artefact is always something that
+# exists in history and can be checked out again.
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # A tag that disagrees with pyproject produces a release whose version is a
+      # lie, and PyPI will not let it be replaced afterwards. Fail before building.
+      - name: Check the tag matches the declared version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          declared=$(python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          if [ "$tag" != "$declared" ]; then
+            echo "::error::tag $GITHUB_REF_NAME implies version $tag, but pyproject declares $declared"
+            exit 1
+          fi
+          echo "version $declared"
+
+      # An upload cannot be undone, so the suite runs here too rather than trusting
+      # that the tagged commit was green when it was on a branch.
+      - name: Install and test
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[test]"
+          pytest -ra -m "not optional_dep and not slow"
+
+      - name: Build
+        run: |
+          pip install build twine
+          python -m build
+          twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/rbfe-network-map
+    permissions:
+      # Trusted Publishing: PyPI verifies a short-lived OIDC token naming this
+      # repository, workflow, and environment. Nothing long-lived is stored, so there
+      # is no API token to leak or rotate.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

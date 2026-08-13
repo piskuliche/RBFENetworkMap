@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rbfe-network-map"
-version = "0.1.0"
+version = "0.2.0"
 description = "Plan Relative Binding Free Energy perturbation networks from RDKit molecules"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,6 +28,12 @@ dependencies = [
   "numpy",
   "scipy>=1.10",
 ]
+
+[project.urls]
+Homepage = "https://github.com/piskuliche/RBFENetworkMap"
+Documentation = "https://piskuliche.github.io/RBFENetworkMap/"
+Repository = "https://github.com/piskuliche/RBFENetworkMap"
+Issues = "https://github.com/piskuliche/RBFENetworkMap/issues"
 
 [project.scripts]
 rbfenet = "rbfenetmap.cli.main:main"

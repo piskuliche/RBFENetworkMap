@@ -237,3 +237,7 @@ ruff check src tests && ruff format --check src tests
 pytest -ra
 pytest -ra -m "not optional_dep and not slow"     # what CI runs
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).

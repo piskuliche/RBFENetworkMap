@@ -10,12 +10,11 @@ from __future__ import annotations
 from typing import ClassVar, Sequence
 
 import numpy as np
-from rdkit import Chem
-from rdkit.Chem import rdFMCS
 
 from rbfenetmap.core.coreprune import prune_core
 from rbfenetmap.core.exceptions import MappingError
 from rbfenetmap.core.kabsch import core_rmsd
+from rbfenetmap.core.mcs import mcs_embeddings, mcs_query
 from rbfenetmap.core.meta.mappers import AbstractMapper
 from rbfenetmap.core.models import AtomMapping, Ligand
 from rbfenetmap.core.molgraph import connected_components_of, mol_to_graph
@@ -75,29 +74,15 @@ class MCSSMapper(AbstractMapper):
         ``"best_rmsd"`` prefers the geometrically closest; ``"first"`` restores the old
         behaviour for comparison.
         """
-        result = rdFMCS.FindMCS(
-            [source.mol, target.mol],
-            maximizeBonds=False,
-            threshold=1.0,
-            matchValences=options.match_valences,
-            ringMatchesRingOnly=options.ring_matches_ring_only,
-            completeRingsOnly=options.complete_rings_only,
-            matchChiralTag=options.match_chiral_tag,
-            bondCompare=rdFMCS.BondCompare.CompareAny,
-            atomCompare=rdFMCS.AtomCompare.CompareAny,
-            timeout=options.timeout,
-        )
-        if not result.smartsString:
-            raise MappingError(f"No common substructure between {source.name!r} and {target.name!r}.")
-        pattern = Chem.MolFromSmarts(result.smartsString)
+        pattern = mcs_query(source.mol, target.mol, options)
         if pattern is None:
             raise MappingError(
-                f"{source.name}~{target.name}: RDKit produced MCS SMARTS {result.smartsString!r} "
-                "that could not be parsed back into a query molecule."
+                f"No usable common substructure between {source.name!r} and {target.name!r}. "
+                "Either the molecules share nothing, or the MCS SMARTS could not be parsed "
+                "back into a query molecule."
             )
 
-        matches_1 = source.mol.GetSubstructMatches(pattern, uniquify=False, maxMatches=options.max_matches)
-        matches_2 = target.mol.GetSubstructMatches(pattern, uniquify=False, maxMatches=options.max_matches)
+        matches_1, matches_2 = mcs_embeddings(source.mol, target.mol, pattern, options)
         if not matches_1 or not matches_2:
             raise MappingError(
                 f"{source.name}~{target.name}: MCS found but its SMARTS does not match "

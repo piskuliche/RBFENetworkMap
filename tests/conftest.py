@@ -9,12 +9,14 @@ into exactly three pieces means finding a molecule pair that happens to produce 
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, ClassVar, Mapping, Sequence
 
+import numpy as np
 import pytest
 from rdkit import Chem
-from rdkit.Chem import AllChem
+from rdkit.Chem import AllChem, rdMolTransforms
 
 from rbfenetmap.core.meta.exporters import AbstractExporter
 from rbfenetmap.core.meta.mappers import AbstractMapper
@@ -141,6 +143,31 @@ def make_coposed(smiles_by_name: Mapping[str, str], scaffold_smiles: str) -> dic
     return ligands
 
 
+def random_frame(seed: int) -> np.ndarray:
+    """Return a deterministic ``(4, 4)`` proper rigid-motion matrix.
+
+    The determinant is forced positive. A scramble that smuggled in a reflection would be
+    unrecoverable by any rotation, so an alignment test built on one would fail for a
+    perfectly good reason while looking exactly like a bug in the aligner.
+    """
+    rng = np.random.default_rng(seed)
+    rotation, upper = np.linalg.qr(rng.normal(size=(3, 3)))
+    rotation = rotation * np.sign(np.diag(upper))
+    if np.linalg.det(rotation) < 0:
+        rotation[:, 0] *= -1
+    matrix = np.eye(4)
+    matrix[:3, :3] = rotation
+    matrix[:3, 3] = rng.normal(size=3) * 40.0
+    return matrix
+
+
+def scramble_frame(ligand: Ligand, *, seed: int) -> Ligand:
+    """Return *ligand* moved rigidly into a frame of its own."""
+    mol = Chem.Mol(ligand.mol)
+    rdMolTransforms.TransformConformer(mol.GetConformer(), random_frame(seed))
+    return replace(ligand, mol=mol)
+
+
 # --- Fixtures --------------------------------------------------------------------
 
 
@@ -181,6 +208,21 @@ def benzamides() -> dict[str, Ligand]:
         },
         "c1ccccc1C(=O)N",
     )
+
+
+@pytest.fixture(scope="session")
+def scrambled_benzamides(benzamides: dict[str, Ligand]) -> dict[str, Ligand]:
+    """The co-posed benzamides, each pushed into a different frame.
+
+    Stands in for ligands prepared separately -- set up individually for ABFE runs, then
+    written to mol2 from their own Amber topologies, each wherever its own box put it. The
+    conformations are identical here and only the frames differ, which makes it the
+    sharpest available test: perfect alignment is achievable, so any residual RMSD is the
+    aligner's doing rather than the chemistry's.
+    """
+    return {
+        name: scramble_frame(ligand, seed=index + 1) for index, (name, ligand) in enumerate(sorted(benzamides.items()))
+    }
 
 
 @pytest.fixture

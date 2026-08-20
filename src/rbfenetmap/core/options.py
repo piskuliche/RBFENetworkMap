@@ -13,6 +13,8 @@ from typing import Literal
 from rbfenetmap.core.models import EDGE_SEPARATOR, parse_edge_key
 
 __all__ = (
+    "AlignmentMethod",
+    "AlignmentOptions",
     "CBFEMode",
     "ChargeChangePolicy",
     "CorePruningPolicy",
@@ -27,6 +29,7 @@ __all__ = (
     "normalize_edge_specs",
 )
 
+AlignmentMethod = Literal["mcs", "o3a"]
 RingPolicy = Literal["ring_system", "none"]
 ChargeChangePolicy = Literal["allow", "penalize", "reject"]
 PairStrategy = Literal["all_unordered_pairs", "all_pairs", "star", "linear", "explicit"]
@@ -203,6 +206,68 @@ class MappingOptions:
     match_selection: Literal["fewest_fragments", "best_rmsd", "first"] = "fewest_fragments"
     distance_threshold: float = 2.0
     core_pruning: CorePruningPolicy = field(default_factory=CorePruningPolicy)
+
+
+@dataclass(frozen=True)
+class AlignmentOptions:
+    """Controls the optional pre-alignment of a ligand set into a common frame.
+
+    Parameters
+    ----------
+    method : {"mcs", "o3a"}
+        ``"mcs"`` (default) fits each ligand onto an already-aligned neighbour through
+        their maximum common substructure, which gives an auditable set of atoms and a
+        residual RMSD that means something. ``"o3a"`` uses RDKit's Open3DAlign, which
+        needs no shared substructure and is the fallback for a set too diverse for an MCS
+        to bite on.
+    reference : str, optional
+        Name of the ligand whose frame everything else is brought into. ``None`` picks the
+        ligand with the most heavy atoms, ties broken by name. In a congeneric series the
+        largest ligand usually *contains* the shared scaffold, so its substructure overlap
+        with every partner is large, and the rule costs no MCS searches to evaluate.
+    min_mcs_atoms : int
+        Refuse to fit on fewer corresponding atoms than this. A ligand that cannot clear
+        the bar is left in its own frame and reported, rather than moved on the strength
+        of an overlap too small to determine where it should go.
+    max_matches : int
+        Cap on the substructure embeddings enumerated while resolving a symmetric overlap.
+
+    Raises
+    ------
+    ValueError
+        If the method is unknown, ``min_mcs_atoms`` is below three, or ``max_matches`` is
+        not positive.
+
+    Notes
+    -----
+    There is deliberately no ``"none"`` method. Alignment is either requested or not
+    requested; a do-nothing member would be a second way to express "off" that every
+    caller downstream would then have to test for.
+
+    ``max_matches`` defaults well below :class:`MappingOptions`' 1000 because the jobs are
+    not comparable. Mapping is choosing the common core an alchemical transformation will
+    actually run, once per candidate edge; this is choosing a *frame*, once per ligand, and
+    the answer is a rigid motion that a few hundred embeddings pin down as well as a
+    thousand would.
+    """
+
+    method: AlignmentMethod = "mcs"
+    reference: str | None = None
+    min_mcs_atoms: int = 3
+    max_matches: int = 200
+
+    def __post_init__(self) -> None:
+        """Reject nonsensical settings up front."""
+        if self.method not in ("mcs", "o3a"):
+            raise ValueError(f"Unknown alignment method {self.method!r}. Choose 'mcs' or 'o3a'.")
+        if self.min_mcs_atoms < 3:
+            raise ValueError(
+                f"min_mcs_atoms must be at least 3, got {self.min_mcs_atoms}. Three non-collinear "
+                "points is the minimum that fixes a rigid body in space; with fewer, the fit is not "
+                "underdetermined so much as meaningless."
+            )
+        if self.max_matches < 1:
+            raise ValueError("max_matches must be at least 1.")
 
 
 @dataclass(frozen=True)

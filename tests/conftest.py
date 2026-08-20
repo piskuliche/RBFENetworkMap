@@ -85,7 +85,7 @@ class DummyPlanner(AbstractNetworkPlanner):
 
     name: ClassVar[str] = "dummy"
 
-    def plan(self, ligands, candidates, options):
+    def plan(self, ligands, candidates, options, *, clusters=()):
         """Return a network containing all feasible candidates."""
         return Network(
             ligands=ligands,
@@ -93,6 +93,7 @@ class DummyPlanner(AbstractNetworkPlanner):
             candidates=tuple(candidates),
             planner=self.name,
             options=options,
+            clusters=clusters,
         )
 
 

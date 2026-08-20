@@ -40,10 +40,16 @@ class StarPlanner(AbstractNetworkPlanner):
     name: ClassVar[str] = "star"
 
     def plan(
-        self, ligands: Mapping[str, Ligand], candidates: Sequence[Transformation], options: NetworkOptions
+        self,
+        ligands: Mapping[str, Ligand],
+        candidates: Sequence[Transformation],
+        options: NetworkOptions,
+        *,
+        clusters: tuple[frozenset[str], ...] = (),
     ) -> Network:
         """Select the hub's spokes."""
         self.check_cbfe_support(options)
+        self.check_clustering_support(options)
         feasible = _feasible_by_pair(candidates)
         feasible = {p: e for p, e in feasible.items() if p not in options.banned_pairs}
         hub = options.hub or self._pick_hub(ligands, feasible)
@@ -70,6 +76,7 @@ class StarPlanner(AbstractNetworkPlanner):
             planner=self.name,
             options=options,
             unmet_constraints=tuple(unmet),
+            clusters=clusters,
         )
         network.validate(require_connected=options.require_connected)
         return network
@@ -94,10 +101,16 @@ class ExplicitPlanner(AbstractNetworkPlanner):
     name: ClassVar[str] = "explicit"
 
     def plan(
-        self, ligands: Mapping[str, Ligand], candidates: Sequence[Transformation], options: NetworkOptions
+        self,
+        ligands: Mapping[str, Ligand],
+        candidates: Sequence[Transformation],
+        options: NetworkOptions,
+        *,
+        clusters: tuple[frozenset[str], ...] = (),
     ) -> Network:
         """Select the named edges, failing loudly on any that is unusable."""
         self.check_cbfe_support(options)
+        self.check_clustering_support(options)
         if not options.explicit_pairs:
             raise NetworkPlanError("The 'explicit' planner requires explicit_pairs.")
         feasible = _feasible_by_pair(candidates)
@@ -120,7 +133,12 @@ class ExplicitPlanner(AbstractNetworkPlanner):
             )
 
         network = Network(
-            ligands=ligands, edges=tuple(edges), candidates=tuple(candidates), planner=self.name, options=options
+            ligands=ligands,
+            edges=tuple(edges),
+            candidates=tuple(candidates),
+            planner=self.name,
+            options=options,
+            clusters=clusters,
         )
         network.validate(require_connected=options.require_connected)
         return network
@@ -136,10 +154,16 @@ class CompletePlanner(AbstractNetworkPlanner):
     name: ClassVar[str] = "complete"
 
     def plan(
-        self, ligands: Mapping[str, Ligand], candidates: Sequence[Transformation], options: NetworkOptions
+        self,
+        ligands: Mapping[str, Ligand],
+        candidates: Sequence[Transformation],
+        options: NetworkOptions,
+        *,
+        clusters: tuple[frozenset[str], ...] = (),
     ) -> Network:
         """Select all feasible edges, honouring bans and any edge cap."""
         self.check_cbfe_support(options)
+        self.check_clustering_support(options)
         feasible = _feasible_by_pair(candidates)
         feasible = {p: e for p, e in feasible.items() if p not in options.banned_pairs}
         ordered = sorted(feasible.items(), key=lambda item: (item[1].score.total, item[0]))
@@ -156,6 +180,7 @@ class CompletePlanner(AbstractNetworkPlanner):
             planner=self.name,
             options=options,
             unmet_constraints=tuple(unmet),
+            clusters=clusters,
         )
         network.validate(require_connected=options.require_connected)
         return network

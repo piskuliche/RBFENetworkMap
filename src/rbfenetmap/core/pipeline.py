@@ -376,33 +376,28 @@ def evaluate_pairs_adaptively(
     # Re-plan outside warning suppression so any genuinely unmet best-effort target is
     # visible exactly once. For a required but impossible connection this raises with
     # diagnostics after all component-bridging possibilities have been attempted.
-    network = planner.plan(ligands, candidates, network_options)
-    return _attach_clusters(network, ligands, candidates, mapping_options, network_options)
+    clusters = _compute_clusters(ligands, candidates, mapping_options, network_options)
+    return planner.plan(ligands, candidates, network_options, clusters=clusters)
 
 
-def _attach_clusters(
-    network: Network,
+def _compute_clusters(
     ligands: Mapping[str, Ligand],
     candidates: Sequence[Transformation],
     mapping_options: MappingOptions,
     network_options: NetworkOptions,
-) -> Network:
-    """Return *network* with its core-sharing partition recorded.
+) -> tuple[frozenset[str], ...]:
+    """Return the core-sharing partition, or empty when none was asked for.
 
-    Applied after planning, and deliberately so. Under ``core_clusters="report"`` the
-    partition is information *about* a network that was selected without reference to it,
-    so computing it here -- rather than threading it into the planner -- is what makes
-    "report changes nothing" true by construction rather than by careful review.
-
-    Under ``"plan"`` the planner has already used the partition and recorded it itself;
-    this then leaves it alone rather than recomputing a second, possibly different one.
+    Computed here rather than inside the planner because it needs
+    :class:`~rbfenetmap.core.options.MappingOptions` and an MCS search. Planners never
+    import RDKit -- the same separation that lets a network be re-scored under new weights
+    without remapping -- so the partition arrives as an argument.
     """
-    if not network_options.clusters_computed or network.clusters:
-        return network
-    clusters = core_clusters(
+    if not network_options.clusters_computed:
+        return ()
+    return core_clusters(
         ligands, _feasible_graph(list(ligands), candidates), network_options.clustering, mapping_options
     )
-    return replace(network, clusters=clusters)
 
 
 def _all_cbfe_candidates(ligands: Mapping[str, Ligand], network_options: NetworkOptions) -> tuple[Transformation, ...]:
@@ -514,6 +509,14 @@ def build_network(
         )
     logger.info("Evaluating %d candidate pair(s) with mapper %r", len(pairs), mapper_obj.name)
 
+    if network_options.clusters_drive_selection and network_options.pair_evaluation == "adaptive":
+        # Adaptive evaluation maps a deliberately incomplete subset, so the feasible graph
+        # the partition is seeded from would be partial and would shift with every batch --
+        # clusters would form, split, and re-form as candidates arrived. Cluster-driven
+        # selection needs the whole picture, so it maps eagerly and says so.
+        logger.info("core_clusters='plan' requires the full candidate pool; mapping eagerly")
+        network_options = replace(network_options, pair_evaluation="eager")
+
     if network_options.pair_evaluation == "adaptive" and planner_obj.name == "mst":
         return evaluate_pairs_adaptively(
             ligands, pairs, mapper_obj, scorer_obj, planner_obj, mapping_options, network_options
@@ -525,5 +528,5 @@ def build_network(
     n_feasible = sum(1 for c in candidates if c.feasible)
     logger.info("%d of %d candidate(s) are feasible", n_feasible, len(candidates))
 
-    network = planner_obj.plan(ligands, candidates, network_options)
-    return _attach_clusters(network, ligands, candidates, mapping_options, network_options)
+    clusters = _compute_clusters(ligands, candidates, mapping_options, network_options)
+    return planner_obj.plan(ligands, candidates, network_options, clusters=clusters)

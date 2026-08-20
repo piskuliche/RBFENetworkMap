@@ -18,6 +18,7 @@ from typing import Sequence
 from rbfenetmap.cli._args import build_alignment_options, build_mapping_options, build_network_options, parse_key_values
 from rbfenetmap.core.exceptions import NetworkPlanError, RBFENetworkMapError
 from rbfenetmap.core.models import EdgeKind, Ligand, Network, RejectionReason, Transformation, parse_edge_key
+from rbfenetmap.core.options import MappingOptions, NetworkOptions
 from rbfenetmap.core.pipeline import build_candidate, build_network, evaluate_pairs
 from rbfenetmap.io.loaders import load_ligands
 
@@ -208,6 +209,42 @@ def _run_exports(network: Network, names: Sequence[str], directory: Path, option
     return written
 
 
+def _print_clusters(network: Network, mapping_options: MappingOptions, network_options: NetworkOptions) -> None:
+    """Show the core-sharing partition and how many edges sit inside each cluster.
+
+    Printed for ``report`` as well as ``plan``, because under ``report`` the partition is
+    the *only* output the flag produces -- a user who saw nothing would reasonably conclude
+    the option had not taken effect.
+    """
+    from rbfenetmap.core.clustering import cluster_core_size
+
+    membership = {name: index for index, cluster in enumerate(network.clusters) for name in cluster}
+    internal: dict[int, int] = {index: 0 for index in range(len(network.clusters))}
+    crossing = 0
+    for edge in network.edges:
+        if membership[edge.source] == membership[edge.target]:
+            internal[membership[edge.source]] += 1
+        else:
+            crossing += 1
+
+    verb = "drove selection" if network_options.clusters_drive_selection else "recorded only"
+    print(f"\n{len(network.clusters)} core-sharing cluster(s) ({verb}), {crossing} bridging edge(s):")
+    rows = []
+    for index, cluster in enumerate(network.clusters):
+        members = sorted(cluster)
+        preview = ", ".join(members[:5]) + ("..." if len(members) > 5 else "")
+        rows.append(
+            [
+                str(index + 1),
+                str(len(members)),
+                str(cluster_core_size(cluster, network.ligands, mapping_options)),
+                str(internal[index]),
+                preview,
+            ]
+        )
+    print(_format_table(rows, ["#", "size", "core", "edges", "members"]))
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
     """Plan a network and write it out."""
     ligands = _load(args)
@@ -255,6 +292,9 @@ def cmd_plan(args: argparse.Namespace) -> int:
     if network.cbfe_edges:
         summary += f"\n  {len(network.rbfe_edges)} RBFE, {len(network.cbfe_edges)} CBFE"
     print(summary)
+
+    if network.clusters:
+        _print_clusters(network, mapping_options, network_options)
     rows = [
         [
             edge.key,

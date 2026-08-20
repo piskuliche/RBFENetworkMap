@@ -34,7 +34,7 @@ would buy the same coverage.
 from __future__ import annotations
 
 import warnings
-from typing import ClassVar, Mapping, Sequence
+from typing import Callable, ClassVar, Mapping, Sequence
 
 import networkx as nx
 
@@ -155,9 +155,15 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
 
     name: ClassVar[str] = "mst"
     supports_cbfe: ClassVar[bool] = True
+    supports_clustering: ClassVar[bool] = True
 
     def plan(
-        self, ligands: Mapping[str, Ligand], candidates: Sequence[Transformation], options: NetworkOptions
+        self,
+        ligands: Mapping[str, Ligand],
+        candidates: Sequence[Transformation],
+        options: NetworkOptions,
+        *,
+        clusters: tuple[frozenset[str], ...] = (),
     ) -> Network:
         """Select the network. See the module docstring for the ordering rationale.
 
@@ -169,10 +175,25 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
         """
         names = list(ligands)
         options.check_edge_budget(len(names))
+        self.check_clustering_support(options)
 
         feasible = _best_by_pair(candidates)
         banned = options.banned_pairs
         feasible = {pair: edge for pair, edge in feasible.items() if pair not in banned}
+
+        # Cluster-driven selection is expressed by *removing* the cross-cluster relative
+        # edges, not by adding a rule to the passes below. With them gone, Kruskal cannot
+        # chain from one scaffold into the next, cycle closure has only intra-cluster edges
+        # to reach for, and the clusters are joined by exactly the bridges chosen at (2) --
+        # a spanning forest, so no cycle ever crosses a boundary. Every stage stays as it
+        # was; only the graph they run on changes.
+        cross_cluster: dict[tuple[str, str], Transformation] = {}
+        if options.clusters_drive_selection and clusters:
+            membership = {name: index for index, cluster in enumerate(clusters) for name in cluster}
+            cross_cluster = {
+                pair: edge for pair, edge in feasible.items() if membership.get(pair[0]) != membership.get(pair[1])
+            }
+            feasible = {pair: edge for pair, edge in feasible.items() if pair not in cross_cluster}
 
         # Costs only; the transformations are built for the handful of pairs that survive
         # selection. Excluding the pairs that already have an RBFE edge here, once, is what
@@ -206,8 +227,13 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
             unmet.append(f"forced edge {spec} has no feasible RBFE mapping; supplied as a CBFE edge")
 
         # (2) Bridges, before the connectivity check below, which is what lets a pool that
-        # would have been a hard failure become a planned network.
-        if options.cbfe_bridges_components:
+        # would have been a hard failure become a planned network. Under cluster-driven
+        # selection the groups being joined are the clusters rather than whatever the pool
+        # left disconnected, which is the whole of the difference: the same c-1 spanning
+        # selection, over a partition that was chosen instead of inherited.
+        if options.clusters_drive_selection and clusters:
+            unmet.extend(self._bridge_clusters(graph, ligands, clusters, cbfe_pool, cross_cluster, options, adopt))
+        elif options.cbfe_bridges_components:
             for pair in select_cbfe_bridges(graph, ligands, cbfe_pool):
                 adopt(pair)
 
@@ -230,8 +256,18 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
         selected = self._add_redundancy(graph, selected, options, unmet)
 
         def chosen(pair: tuple[str, str]) -> Transformation:
-            """Materialize the transformation behind a selected pair."""
-            edge = feasible.get(pair)
+            """Materialize the transformation behind a selected pair.
+
+            The graph's ``kind`` is the authority, not the presence of a relative edge in
+            one of the pools. Under cluster-driven selection a cross-cluster pair can be
+            in *both*: it has a feasible RBFE mapping that was set aside for crossing a
+            boundary, and it was then adopted as a counterpoised bridge. Falling through to
+            the relative edge there would silently hand back an RBFE transformation for an
+            edge the planner selected, priced, and reported as CBFE.
+            """
+            if graph.edges[pair]["kind"] == EdgeKind.CBFE.value:
+                return make_cbfe_transformation(ligands[pair[0]], ligands[pair[1]], options)
+            edge = feasible.get(pair) or cross_cluster.get(pair)
             if edge is not None:
                 return edge
             return make_cbfe_transformation(ligands[pair[0]], ligands[pair[1]], options)
@@ -244,9 +280,100 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
             planner=self.name,
             options=options,
             unmet_constraints=tuple(unmet),
+            clusters=clusters,
         )
         network.validate(require_connected=options.require_connected)
         return network
+
+    def _bridge_clusters(
+        self,
+        graph: nx.Graph,
+        ligands: Mapping[str, Ligand],
+        clusters: tuple[frozenset[str], ...],
+        cbfe_pool: dict[tuple[str, str], float],
+        cross_cluster: Mapping[tuple[str, str], Transformation],
+        options: NetworkOptions,
+        adopt: "Callable[[tuple[str, str]], None]",
+    ) -> list[str]:
+        """Join the clusters, and report any that cannot carry a cycle.
+
+        Parameters
+        ----------
+        graph : networkx.Graph
+            The intra-cluster graph. Mutated: the chosen bridges are added to it.
+        ligands : Mapping[str, Ligand]
+        clusters : tuple[frozenset[str], ...]
+            The partition, from :func:`~rbfenetmap.core.clustering.core_clusters`.
+        cbfe_pool : dict[tuple[str, str], float]
+            Counterpoised costs. Bridges taken from here are popped by *adopt*.
+        cross_cluster : Mapping[tuple[str, str], Transformation]
+            The feasible relative edges that were removed for crossing a boundary. Only
+            consulted under ``inter_cluster="prefer_rbfe"``.
+        options : NetworkOptions
+        adopt : Callable
+            The caller's closure that moves a pair from the pool onto *graph* as CBFE.
+
+        Returns
+        -------
+        list[str]
+            Messages for ``unmet_constraints``.
+
+        Notes
+        -----
+        Under ``"prefer_rbfe"`` the relative edges are restored to the graph *before*
+        bridge selection rather than being chosen instead of it. That ordering is what keeps
+        the two halves from double-bridging: restoring first makes the clusters they join a
+        single connected component, so
+        :func:`~rbfenetmap.core.cbfe.select_cbfe_bridges` sees fewer groups and asks for
+        fewer counterpoised edges, with no coordination between them needed.
+        """
+        unmet: list[str] = []
+
+        if options.clustering.inter_cluster == "prefer_rbfe":
+            # A *spanning* selection over the cluster quotient graph, not the cheapest edge
+            # per cluster pair. Keeping one per pair would restore up to C(c, 2) relative
+            # edges -- 45 of them across ten clusters -- which is most of the way back to the
+            # unclustered network the user asked to move away from. Union-find in cost order
+            # keeps at most c - 1, the same budget the counterpoised bridges get.
+            membership = {name: index for index, cluster in enumerate(clusters) for name in cluster}
+            parent = {index: index for index in range(len(clusters))}
+
+            def find(index: int) -> int:
+                """Union-find with path compression, over cluster indices."""
+                while parent[index] != index:
+                    parent[index] = parent[parent[index]]
+                    index = parent[index]
+                return index
+
+            ranked = sorted(cross_cluster.items(), key=lambda item: (item[1].score.total, item[0]))
+            for pair, edge in ranked:
+                root_a, root_b = find(membership[pair[0]]), find(membership[pair[1]])
+                if root_a == root_b:
+                    continue
+                parent[root_b] = root_a
+                graph.add_edge(pair[0], pair[1], weight=edge.score.total, kind=EdgeKind.RBFE.value)
+                cbfe_pool.pop(pair, None)
+
+        # Deliberately the graph's own components, not the cluster partition. Removing the
+        # cross-cluster relative edges is what enforces the partition; what remains to be
+        # joined is then exactly whatever that left disconnected, which is the question this
+        # function already answers. Passing the clusters instead would insist on c - 1
+        # bridges even where "prefer_rbfe" had already joined two of them, and would miss a
+        # cluster that a banned edge had split in half.
+        if options.cbfe_bridges_components:
+            for pair in select_cbfe_bridges(graph, ligands, cbfe_pool):
+                adopt(pair)
+
+        too_small = sorted(
+            (sorted(cluster) for cluster in clusters if len(cluster) < options.clustering.min_cluster_size), key=len
+        )
+        if too_small:
+            unmet.append(
+                f"{len(too_small)} cluster(s) below min_cluster_size="
+                f"{options.clustering.min_cluster_size} cannot carry a cycle: "
+                f"{too_small[:4]}{'...' if len(too_small) > 4 else ''}"
+            )
+        return unmet
 
     def _check_forced(
         self,

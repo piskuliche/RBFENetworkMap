@@ -37,6 +37,39 @@ class AbstractNetworkPlanner(ABC):
     #: pipeline hands it a pool that is already entirely CBFE.
     supports_cbfe: ClassVar[bool] = False
 
+    #: Whether this planner knows how to let a core-sharing partition drive selection.
+    #: Only ``report`` mode works with any planner, because it merely records the partition
+    #: alongside a network selected without reference to it. ``plan`` mode has to restrict
+    #: the candidate graph to intra-cluster edges and bridge the clusters, which is the same
+    #: kind of component-level reasoning ``supports_cbfe`` gates.
+    supports_clustering: ClassVar[bool] = False
+
+    def check_clustering_support(self, options: NetworkOptions) -> None:
+        """Raise if *options* asks for cluster-driven selection this planner cannot do.
+
+        Parameters
+        ----------
+        options : NetworkOptions
+
+        Raises
+        ------
+        rbfenetmap.core.exceptions.NetworkPlanError
+
+        Notes
+        -----
+        Only ``core_clusters="plan"`` is gated. ``"report"`` is deliberately allowed
+        everywhere: it changes nothing about selection, so there is nothing for a planner to
+        support, and refusing it would deny a user the cluster analysis of a star or complete
+        network for no reason.
+        """
+        if self.supports_clustering or not options.clusters_drive_selection:
+            return
+        raise NetworkPlanError(
+            f"Planner {self.name!r} cannot let clusters drive selection, but core_clusters="
+            f"{options.core_clusters!r} requires it. Use the 'mst' planner, or core_clusters='report' "
+            "to record the partition without changing which edges are selected."
+        )
+
     def check_cbfe_support(self, options: NetworkOptions) -> None:
         """Raise if *options* asks for CBFE placement this planner cannot do.
 
@@ -64,7 +97,12 @@ class AbstractNetworkPlanner(ABC):
 
     @abstractmethod
     def plan(
-        self, ligands: Mapping[str, Ligand], candidates: Sequence[Transformation], options: NetworkOptions
+        self,
+        ligands: Mapping[str, Ligand],
+        candidates: Sequence[Transformation],
+        options: NetworkOptions,
+        *,
+        clusters: tuple[frozenset[str], ...] = (),
     ) -> Network:
         """Select edges and return the planned network.
 
@@ -76,6 +114,16 @@ class AbstractNetworkPlanner(ABC):
             Scored candidates, feasible and infeasible.
         options : NetworkOptions
             The user's selection knobs.
+        clusters : tuple[frozenset[str], ...], optional
+            The core-sharing partition, when one was computed. Supplied by the pipeline
+            rather than derived here, because building it needs
+            :class:`~rbfenetmap.core.options.MappingOptions` and an MCS search -- and a
+            planner that imported RDKit to get them would be the one place in the package
+            where selection depends on how the mapping was produced.
+
+            An implementation must place it on
+            :attr:`~rbfenetmap.core.models.Network.clusters` whether or not it uses it, so
+            that ``core_clusters="report"`` works with every planner.
 
         Returns
         -------

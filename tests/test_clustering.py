@@ -258,3 +258,170 @@ class TestSerialization:
         restored = load_network(path)
         assert restored.clusters == ()
         assert restored.options.core_clusters == "off"
+
+
+class TestClusterDrivenSelection:
+    """``plan`` mode: cycles inside clusters, single bridges between them."""
+
+    @staticmethod
+    def _split(network):
+        """Return ``(membership, intra, cross)`` for the selected edges."""
+        membership = {name: index for index, cluster in enumerate(network.clusters) for name in cluster}
+        intra = [e for e in network.edges if membership[e.source] == membership[e.target]]
+        cross = [e for e in network.edges if membership[e.source] != membership[e.target]]
+        return membership, intra, cross
+
+    def test_scaffolds_become_cycled_clusters_joined_by_bridges(self, three_scaffolds):
+        """The headline result: three internally cycled clusters, two counterpoised bridges."""
+        network = build_network(
+            three_scaffolds,
+            network_options=NetworkOptions(
+                core_clusters="plan",
+                cbfe_mode="bridge",
+                min_cycle_coverage=1.0,
+                clustering=ClusteringPolicy(min_core_atoms=6),
+            ),
+        )
+        _, intra, cross = self._split(network)
+        assert len(network.clusters) == 3
+        assert len(cross) == len(network.clusters) - 1, "expected a spanning set of bridges, no more"
+        assert all(edge.kind.value == "cbfe" for edge in cross)
+        assert all(edge.kind.value == "rbfe" for edge in intra)
+
+    def test_clusters_are_internally_cycled(self, three_scaffolds):
+        """Each cluster large enough to hold a cycle has one."""
+        network = build_network(
+            three_scaffolds,
+            network_options=NetworkOptions(
+                core_clusters="plan",
+                cbfe_mode="bridge",
+                min_cycle_coverage=1.0,
+                clustering=ClusteringPolicy(min_core_atoms=6),
+            ),
+        )
+        _, intra, _ = self._split(network)
+        graph: nx.Graph = nx.Graph()
+        graph.add_nodes_from(network.ligands)
+        graph.add_edges_from((edge.source, edge.target) for edge in intra)
+        for cluster in network.clusters:
+            if len(cluster) < 3:
+                continue
+            subgraph = graph.subgraph(cluster)
+            assert subgraph.number_of_edges() >= len(cluster), f"{sorted(cluster)} is a tree, not cycled"
+
+    def test_no_cycle_crosses_a_cluster_boundary(self, three_scaffolds):
+        """Bridges form a spanning forest over the clusters, so the quotient graph is a tree."""
+        network = build_network(
+            three_scaffolds,
+            network_options=NetworkOptions(
+                core_clusters="plan", cbfe_mode="bridge", clustering=ClusteringPolicy(min_core_atoms=6)
+            ),
+        )
+        membership, _, cross = self._split(network)
+        quotient: nx.Graph = nx.Graph()
+        quotient.add_nodes_from(range(len(network.clusters)))
+        for edge in cross:
+            assert not quotient.has_edge(membership[edge.source], membership[edge.target]), "duplicate bridge"
+            quotient.add_edge(membership[edge.source], membership[edge.target])
+        assert quotient.number_of_edges() == len(network.clusters) - 1
+
+    def test_a_connected_pool_can_still_be_clustered(self, benzamides):
+        """The capability ``cbfe_mode='bridge'`` alone cannot provide.
+
+        On a single-scaffold series every pair maps, so there are no disconnected components
+        for bridging to find. Only a deliberate partition can split it.
+        """
+        options = dict(cbfe_mode="bridge", edges_per_ligand=1, min_cycle_coverage=0.0)
+        unclustered = build_network(benzamides, network_options=NetworkOptions(**options))
+        assert unclustered.clusters == ()
+
+        clustered = build_network(
+            benzamides,
+            network_options=NetworkOptions(
+                core_clusters="plan", clustering=ClusteringPolicy(min_core_atoms=10, min_cluster_size=2), **options
+            ),
+        )
+        assert len(clustered.clusters) > 1, "a connected pool was not split"
+        _, _, cross = self._split(clustered)
+        assert all(edge.kind.value == "cbfe" for edge in cross)
+
+    def test_cross_cluster_bridge_is_priced_as_cbfe(self, benzamides):
+        """Regression: a bridged pair that also had a feasible RBFE mapping.
+
+        Such a pair sits in both pools -- set aside for crossing a boundary, then adopted as
+        a bridge. Materializing it from the relative pool would hand back an RBFE
+        transformation for an edge the planner selected, priced, and reported as CBFE.
+        """
+        network = build_network(
+            benzamides,
+            network_options=NetworkOptions(
+                core_clusters="plan",
+                cbfe_mode="bridge",
+                edges_per_ligand=1,
+                clustering=ClusteringPolicy(min_core_atoms=10, min_cluster_size=2),
+            ),
+        )
+        _, _, cross = self._split(network)
+        assert cross, "expected at least one bridge"
+        for edge in cross:
+            assert edge.kind.value == "cbfe"
+            assert edge.score.total >= network.options.cbfe_base_cost
+            assert edge.mapping.n_common_core == 0, "a counterpoised edge has no common core"
+
+    def test_prefer_rbfe_uses_relative_edges_and_stays_spanning(self, benzamides):
+        """``prefer_rbfe`` swaps the bridge kind without spending more of them."""
+        policy = dict(min_core_atoms=10, min_cluster_size=2)
+        network = build_network(
+            benzamides,
+            network_options=NetworkOptions(
+                core_clusters="plan",
+                cbfe_mode="bridge",
+                edges_per_ligand=1,
+                clustering=ClusteringPolicy(inter_cluster="prefer_rbfe", **policy),
+            ),
+        )
+        _, _, cross = self._split(network)
+        assert len(cross) == len(network.clusters) - 1, "prefer_rbfe must not restore a quadratic set"
+        assert any(edge.kind.value == "rbfe" for edge in cross)
+
+    def test_homogeneous_series_plans_as_one_cluster(self, benzamides):
+        """One cluster means no bridges: ``plan`` degrades to the ordinary network."""
+        network = build_network(
+            benzamides,
+            network_options=NetworkOptions(
+                core_clusters="plan", cbfe_mode="bridge", clustering=ClusteringPolicy(min_core_atoms=6)
+            ),
+        )
+        assert len(network.clusters) == 1
+        assert all(edge.kind.value == "rbfe" for edge in network.edges)
+
+    def test_small_clusters_are_reported_not_rejected(self, benzamides):
+        """A cluster too small to cycle still forms, and says so."""
+        network = build_network(
+            benzamides,
+            network_options=NetworkOptions(
+                core_clusters="plan",
+                cbfe_mode="bridge",
+                edges_per_ligand=1,
+                clustering=ClusteringPolicy(min_core_atoms=10, min_cluster_size=3),
+            ),
+        )
+        assert any("cannot carry a cycle" in message for message in network.unmet_constraints)
+
+    def test_other_planners_refuse_plan_but_allow_report(self, benzamides):
+        """``report`` needs no planner support; ``plan`` does, and says which to use."""
+        from rbfenetmap.core.exceptions import NetworkPlanError
+
+        # cbfe_mode stays 'off' and the bridges would be relative, so the CBFE support check
+        # passes and the clustering one is what fires. Testing them separately keeps this
+        # about clustering rather than about which guard happens to run first.
+        with pytest.raises(NetworkPlanError, match="cannot let clusters drive selection"):
+            build_network(
+                benzamides,
+                planner="complete",
+                network_options=NetworkOptions(
+                    core_clusters="plan", clustering=ClusteringPolicy(min_core_atoms=6, inter_cluster="prefer_rbfe")
+                ),
+            )
+        network = build_network(benzamides, planner="complete", network_options=NetworkOptions(core_clusters="report"))
+        assert len(network.clusters) == 1

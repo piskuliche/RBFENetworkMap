@@ -232,6 +232,14 @@ mappings that pair atoms occupying different parts of the pocket. Independently 
 conformers share no frame and every edge between them is correctly rejected for geometry.
 `examples/data/make_conformers.py` shows the constrained-embedding pattern.
 
+Structures prepared *separately* — set up individually for ABFE runs, say, and written to
+mol2 from their own Amber topologies — are a different case: their conformers are real bound
+poses and only the frames disagree. `rbfenet plan --align` rigidly superposes them into a
+common frame first, reports the per-ligand fit, and writes the moved structures out with
+`--write-aligned` so you can check them. It recovers a common frame, not a common
+conformation, so expect some residual `core_rmsd` to survive. See
+[Aligning ligands](https://piskuliche.github.io/RBFENetworkMap/quickstart.html#aligning-ligands).
+
 ## Development
 
 ```bash

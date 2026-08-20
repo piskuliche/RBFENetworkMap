@@ -12,13 +12,14 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
-from rbfenetmap.core.options import CorePruningPolicy, MappingOptions, NetworkOptions, SoftcorePolicy
+from rbfenetmap.core.options import AlignmentOptions, CorePruningPolicy, MappingOptions, NetworkOptions, SoftcorePolicy
 
 __all__ = (
     "add_ligand_arguments",
     "add_mapping_arguments",
     "add_network_arguments",
     "add_softcore_arguments",
+    "build_alignment_options",
     "build_mapping_options",
     "build_network_options",
     "parse_key_values",
@@ -76,6 +77,42 @@ def add_ligand_arguments(parser: argparse.ArgumentParser) -> None:
         default="_Name",
         metavar="PROP",
         help="Molecule property to read ligand names from (default: %(default)s).",
+    )
+    # nargs="?" is unambiguous only because no subcommand takes a positional argument:
+    # `--align` followed by another flag, or by the end of the line, can only mean the
+    # const. Adding a positional to plan/score/map would break that quietly.
+    group.add_argument(
+        "--align",
+        nargs="?",
+        const="mcs",
+        choices=("mcs", "o3a"),
+        default=None,
+        metavar="METHOD",
+        help=(
+            "Rigidly align the ligands into a common frame before mapping. Bare --align uses "
+            "'mcs' (maximum common substructure plus Kabsch, applied outward along a similarity "
+            "tree); 'o3a' uses Open3DAlign, for sets with no substructure large enough to fit on. "
+            "Off by default: ligands prepared together are already co-posed, and aligning those "
+            "would hide a real pose problem rather than solve one."
+        ),
+    )
+    group.add_argument(
+        "--align-reference",
+        metavar="LIGAND",
+        help="Ligand whose frame the others are brought into (default: the one with the most heavy atoms).",
+    )
+    group.add_argument(
+        "--align-min-atoms",
+        type=int,
+        default=3,
+        metavar="N",
+        help="Refuse to align a ligand on fewer than N corresponding heavy atoms (default: %(default)s).",
+    )
+    group.add_argument(
+        "--write-aligned",
+        type=Path,
+        metavar="DIR",
+        help="Write the aligned structures here, one SDF per ligand, for inspection.",
     )
 
 
@@ -289,6 +326,19 @@ def add_network_arguments(parser: argparse.ArgumentParser) -> None:
         "pure Python, so speedup is sublinear and there is nothing to gain from setting "
         "this above the CPU count.",
     )
+
+
+def build_alignment_options(args: argparse.Namespace) -> AlignmentOptions | None:
+    """Assemble :class:`AlignmentOptions`, or ``None`` when ``--align`` was not given.
+
+    Returning ``None`` rather than an options object with alignment switched off keeps the
+    "not requested" case out of the library entirely: nothing downstream has to test for a
+    do-nothing method.
+    """
+    method = getattr(args, "align", None)
+    if method is None:
+        return None
+    return AlignmentOptions(method=method, reference=args.align_reference, min_mcs_atoms=args.align_min_atoms)
 
 
 def build_mapping_options(args: argparse.Namespace) -> MappingOptions:

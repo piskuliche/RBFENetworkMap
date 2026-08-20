@@ -84,7 +84,8 @@ def _prepare(mol: Chem.Mol, name: str, source: Path, *, embed_if_missing: bool) 
         logger.warning(
             "%s has no 3D conformer; embedding it independently. Ligands embedded this way are not "
             "posed in a common frame -- expect core_geometry_mismatch rejections. Supply co-posed "
-            "structures, or raise core_rmsd_threshold.",
+            "structures, align them with rbfenetmap.core.align.align_ligands (rbfenet --align), or "
+            "raise core_rmsd_threshold.",
             name,
         )
         if AllChem.EmbedMolecule(mol, randomSeed=0xF00D) != 0:

@@ -570,3 +570,172 @@ class TestCLI:
         assert "common core" in out
         assert "amber masks" in out
         assert "descriptors" in out
+
+
+class TestAlignmentCLI:
+    """The ``--align`` path, end to end through the console entry point.
+
+    The scrambled fixture here reproduces the situation the flag exists for: ligands
+    prepared separately, each written out in whatever frame its own preparation left it in.
+    """
+
+    @staticmethod
+    def _write(ligands, path):
+        """Write a name-tagged multi-record SDF and return its path."""
+        from rdkit import Chem
+
+        with Chem.SDWriter(str(path)) as writer:
+            for ligand in ligands.values():
+                mol = Chem.Mol(ligand.mol)
+                mol.SetProp("_Name", ligand.name)
+                writer.write(mol)
+        return path
+
+    @pytest.fixture
+    def scrambled_sdf(self, planned, tmp_path):
+        """The benzamide series, each member in a frame of its own, as one SDF."""
+        from .conftest import scramble_frame
+
+        scrambled = {
+            name: scramble_frame(ligand, seed=index + 1)
+            for index, (name, ligand) in enumerate(sorted(planned.ligands.items()))
+        }
+        return self._write(scrambled, tmp_path / "scrambled.sdf")
+
+    def test_plan_fails_without_align_and_says_why(self, scrambled_sdf, tmp_path, capsys):
+        code = main(["plan", "--ligands", str(scrambled_sdf), "--out", str(tmp_path / "n.json")])
+        assert code == 1
+        err = capsys.readouterr().err
+        assert "core_geometry_mismatch" in err
+        assert "--align" in err
+
+    def test_align_recovers_a_network(self, scrambled_sdf, tmp_path, capsys):
+        out = tmp_path / "aligned.json"
+        code = main(["plan", "--ligands", str(scrambled_sdf), "--align", "--out", str(out)])
+        assert code == 0
+        network = load_network(out)
+        network.validate()
+        assert network.edges
+
+    def test_no_hint_is_offered_once_align_is_in_use(self, scrambled_sdf, tmp_path, capsys):
+        main(["plan", "--ligands", str(scrambled_sdf), "--align", "--out", str(tmp_path / "n.json")])
+        assert "Re-run with --align" not in capsys.readouterr().err
+
+    def test_the_alignment_report_goes_to_stderr(self, scrambled_sdf, tmp_path, capsys):
+        main(["plan", "--ligands", str(scrambled_sdf), "--align", "--out", str(tmp_path / "n.json")])
+        captured = capsys.readouterr()
+        assert "Aligned 5 ligand(s)" in captured.err
+        assert "Aligned 5 ligand(s)" not in captured.out
+
+    def test_score_json_output_stays_parseable_under_align(self, scrambled_sdf, capsys):
+        # The one way this feature could break an existing workflow: a report on stdout
+        # would turn a machine-readable document into a parse error.
+        code = main(["score", "--ligands", str(scrambled_sdf), "--align", "--format", "json"])
+        assert code == 0
+        assert json.loads(capsys.readouterr().out)
+
+    def test_write_aligned_produces_one_reloadable_file_per_ligand(self, scrambled_sdf, tmp_path):
+        from rbfenetmap.io.loaders import load_ligands
+
+        destination = tmp_path / "aligned"
+        main(
+            [
+                "plan",
+                "--ligands",
+                str(scrambled_sdf),
+                "--align",
+                "--write-aligned",
+                str(destination),
+                "--out",
+                str(tmp_path / "n.json"),
+            ]
+        )
+        written = sorted(destination.glob("*.sdf"))
+        assert len(written) == 5
+        reloaded = load_ligands([destination])
+        assert len(reloaded) == 5
+        assert reloaded[0].mol.GetProp("rbfenet_align_method") in ("mcs", "reference")
+
+    def test_an_explicit_reference_is_honoured(self, scrambled_sdf, tmp_path, capsys):
+        main(
+            [
+                "plan",
+                "--ligands",
+                str(scrambled_sdf),
+                "--align",
+                "--align-reference",
+                "bza_H",
+                "--out",
+                str(tmp_path / "n.json"),
+            ]
+        )
+        assert "into the frame of bza_H" in capsys.readouterr().err
+
+    def test_an_unknown_reference_exits_nonzero(self, scrambled_sdf, tmp_path, capsys):
+        code = main(
+            [
+                "plan",
+                "--ligands",
+                str(scrambled_sdf),
+                "--align",
+                "--align-reference",
+                "nope",
+                "--out",
+                str(tmp_path / "n.json"),
+            ]
+        )
+        assert code == 1
+        assert "Unknown alignment reference" in capsys.readouterr().err
+
+    def test_alignment_metadata_survives_the_network_round_trip(self, scrambled_sdf, tmp_path):
+        # Provenance rides in Ligand.metadata, which networkio already carries, so this is
+        # the proof that no schema change was needed.
+        out = tmp_path / "aligned.json"
+        main(["plan", "--ligands", str(scrambled_sdf), "--align", "--out", str(out)])
+        network = load_network(out)
+        for ligand in network.ligands.values():
+            record = dict(ligand.metadata)["alignment"]
+            assert record["ok"] is True
+            assert record["method"] in ("mcs", "reference")
+
+    def test_masks_are_unaffected_by_the_frame(self, planned, scrambled_sdf, tmp_path):
+        # Alignment moves coordinates; it must not move atom indices. Amber masks are
+        # index-based, so a scrambled-then-aligned run has to produce exactly what a
+        # co-posed run does, or exported topologies would depend on where the boxes were.
+        out = tmp_path / "aligned.json"
+        main(["plan", "--ligands", str(scrambled_sdf), "--align", "--edges-per-ligand", "2", "--out", str(out)])
+        aligned = load_network(out)
+
+        def swapped(masks):
+            """The same masks as seen from the other end of the edge.
+
+            Both halves have to flip: the ``1``/``2`` suffix that says which ligand, and the
+            ``:SRC``/``:DST`` residue selector inside the value that says the same thing again.
+            """
+            return {
+                key[:-1] + ("2" if key.endswith("1") else "1"): value.replace(":SRC", "\x00")
+                .replace(":DST", ":SRC")
+                .replace("\x00", ":DST")
+                for key, value in masks.items()
+            }
+
+        reference = {
+            edge.unordered_key: (
+                edge.source,
+                build_amber_masks(planned.ligands[edge.source], planned.ligands[edge.target], edge.mapping).as_dict(),
+            )
+            for edge in planned.edges
+        }
+        shared = 0
+        for edge in aligned.edges:
+            if edge.unordered_key not in reference:
+                continue
+            shared += 1
+            source, expected = reference[edge.unordered_key]
+            masks = build_amber_masks(
+                aligned.ligands[edge.source], aligned.ligands[edge.target], edge.mapping
+            ).as_dict()
+            # A tied soft-core lets the two runs orient the edge differently -- they were
+            # given the ligands in different orders -- so compare from a common end.
+            assert masks == (expected if edge.source == source else swapped(expected))
+        assert shared, "the two runs shared no edges, so the comparison proved nothing"

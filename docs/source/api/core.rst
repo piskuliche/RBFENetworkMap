@@ -25,6 +25,8 @@ Molecular graphs
 
 .. automodule:: rbfenetmap.core.kabsch
 
+.. automodule:: rbfenetmap.core.align
+
 Pipeline
 --------
 
@@ -33,6 +35,8 @@ Pipeline
 .. automodule:: rbfenetmap.core.pairs
 
 .. automodule:: rbfenetmap.core.descriptors
+
+.. automodule:: rbfenetmap.core.mcs
 
 .. automodule:: rbfenetmap.core.cbfe
 

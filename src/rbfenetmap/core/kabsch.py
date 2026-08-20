@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import numpy as np
 
-__all__ = ("core_rmsd", "kabsch_rotation", "pair_distances", "superpose")
+__all__ = ("apply_transform", "core_rmsd", "kabsch_rotation", "pair_distances", "rigid_transform", "superpose")
 
 
 def kabsch_rotation(mobile: np.ndarray, reference: np.ndarray) -> np.ndarray:
@@ -46,6 +46,73 @@ def kabsch_rotation(mobile: np.ndarray, reference: np.ndarray) -> np.ndarray:
     return vt.T @ correction @ u.T
 
 
+def rigid_transform(mobile: np.ndarray, reference: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return the ``(rotation, translation)`` best superposing *mobile* onto *reference*.
+
+    Parameters
+    ----------
+    mobile, reference : numpy.ndarray
+        ``(n, 3)`` coordinate arrays of corresponding points.
+
+    Returns
+    -------
+    rotation : numpy.ndarray
+        A ``(3, 3)`` proper rotation matrix.
+    translation : numpy.ndarray
+        A length-3 vector, such that ``mobile @ rotation.T + translation`` is the
+        superposed result.
+
+    Raises
+    ------
+    ValueError
+        If the two arrays do not have the same shape.
+
+    Notes
+    -----
+    This is the piece :func:`superpose` cannot give you, and the reason it exists. The fit
+    is computed over a *subset* of corresponding atoms -- typically a common core -- but the
+    transform it yields is a property of the whole rigid body, so it can be applied to every
+    atom of the mobile molecule, including the ones that took no part in the fit. Superposing
+    coordinate arrays in isolation re-centres only the points it was handed, which is correct
+    for measuring an RMSD and useless for moving a molecule.
+    """
+    mobile = np.asarray(mobile, dtype=float)
+    reference = np.asarray(reference, dtype=float)
+    if mobile.shape != reference.shape:
+        raise ValueError(f"Coordinate shapes disagree: {mobile.shape} vs {reference.shape}.")
+    if mobile.shape[0] == 0:
+        return np.eye(3), np.zeros(3)
+    mobile_centre = mobile.mean(axis=0)
+    reference_centre = reference.mean(axis=0)
+    rotation = kabsch_rotation(mobile - mobile_centre, reference - reference_centre)
+    # (m - m_bar) @ R.T + r_bar == m @ R.T + (r_bar - m_bar @ R.T), so the centring folds
+    # into a single translation and the transform becomes applicable to any point.
+    return rotation, reference_centre - mobile_centre @ rotation.T
+
+
+def apply_transform(coords: np.ndarray, rotation: np.ndarray, translation: np.ndarray) -> np.ndarray:
+    """Return ``coords`` rotated and translated by a :func:`rigid_transform` result.
+
+    Parameters
+    ----------
+    coords : numpy.ndarray
+        ``(n, 3)`` coordinates. Need not be the points the transform was fitted on.
+    rotation : numpy.ndarray
+        A ``(3, 3)`` rotation matrix.
+    translation : numpy.ndarray
+        A length-3 translation vector.
+
+    Returns
+    -------
+    numpy.ndarray
+        The transformed ``(n, 3)`` coordinates.
+    """
+    coords = np.asarray(coords, dtype=float)
+    if coords.shape[0] == 0:
+        return coords.copy()
+    return coords @ np.asarray(rotation, dtype=float).T + np.asarray(translation, dtype=float)
+
+
 def superpose(mobile: np.ndarray, reference: np.ndarray) -> np.ndarray:
     """Return *mobile* rigidly superposed onto *reference*.
 
@@ -58,17 +125,12 @@ def superpose(mobile: np.ndarray, reference: np.ndarray) -> np.ndarray:
     -------
     numpy.ndarray
         The transformed *mobile* coordinates.
+
+    See Also
+    --------
+    rigid_transform : Returns the transform itself, for applying to further points.
     """
-    mobile = np.asarray(mobile, dtype=float)
-    reference = np.asarray(reference, dtype=float)
-    if mobile.shape != reference.shape:
-        raise ValueError(f"Coordinate shapes disagree: {mobile.shape} vs {reference.shape}.")
-    if mobile.shape[0] == 0:
-        return mobile.copy()
-    mobile_centre = mobile.mean(axis=0)
-    reference_centre = reference.mean(axis=0)
-    rotation = kabsch_rotation(mobile - mobile_centre, reference - reference_centre)
-    return (mobile - mobile_centre) @ rotation.T + reference_centre
+    return apply_transform(np.asarray(mobile, dtype=float), *rigid_transform(mobile, reference))
 
 
 def core_rmsd(mobile: np.ndarray, reference: np.ndarray, *, superpose_first: bool = False) -> float:
@@ -94,6 +156,11 @@ def core_rmsd(mobile: np.ndarray, reference: np.ndarray, *, superpose_first: boo
     that actually occupy the same region of the pocket. Superposing first would discard
     precisely that information and reward a mapping that is self-consistent but
     misplaced. Pass ``superpose_first=True`` only when the inputs are not co-posed.
+
+    Superposing here measures a single pair in isolation and throws the transform away. To
+    bring a whole *set* of ligands into a common frame before planning -- the case where the
+    inputs were prepared separately, for instance converted to mol2 from independent Amber
+    topologies -- use :mod:`rbfenetmap.core.align` instead.
     """
     mobile = np.asarray(mobile, dtype=float)
     reference = np.asarray(reference, dtype=float)

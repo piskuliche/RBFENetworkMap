@@ -15,6 +15,8 @@ invariants, a plugin that is not installed.
 
 from __future__ import annotations
 
+from typing import Any, Sequence
+
 
 class RBFENetworkMapError(Exception):
     """Base class for every error raised by :mod:`rbfenetmap`."""
@@ -40,7 +42,25 @@ class NetworkPlanError(RBFENetworkMapError):
     Raised when user constraints are unsatisfiable rather than merely tight: a forced
     edge that is infeasible, ``n_edges`` too small to span the ligands, or a candidate
     pool that is disconnected while ``require_connected`` is set.
+
+    Parameters
+    ----------
+    message : str
+        The actionable description, which is what a bare ``str()`` of the error yields.
+    rejected : Sequence, optional
+        The infeasible candidates the planner had to work around, when it has them.
+
+    Notes
+    -----
+    The payload exists because the *pattern* of rejections often diagnoses the run better
+    than any single one of them does. A caller that wants to say "these all failed the same
+    way, and here is what that usually means" should not have to re-derive the pool or, worse,
+    parse it back out of the message it just formatted.
     """
+
+    def __init__(self, message: str, rejected: "Sequence[Any]" = ()) -> None:
+        super().__init__(message)
+        self.rejected = tuple(rejected)
 
 
 class ExporterError(RBFENetworkMapError):

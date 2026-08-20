@@ -211,7 +211,10 @@ def _fit_mcs(
     the question is which correspondence yields the best rigid superposition. A symmetric
     ring taken the wrong way round shows up plainly under that criterion.
     """
-    pattern = mcs_query(mobile.mol, reference.mol, mapping_options)
+    # Elements must match here. See the note on mcs_query: the mapper can afford a
+    # permissive atom compare because pruning and the geometry gate sit behind it, and this
+    # has neither -- the correspondence chosen here is the frame, and nothing revisits it.
+    pattern = mcs_query(mobile.mol, reference.mol, mapping_options, match_elements=True)
     if pattern is None:
         return None
     matches_mobile, matches_reference = mcs_embeddings(mobile.mol, reference.mol, pattern, mapping_options)

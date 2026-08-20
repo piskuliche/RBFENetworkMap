@@ -22,7 +22,7 @@ import pytest
 from rbfenetmap.core.align import align_ligands, choose_reference
 from rbfenetmap.core.exceptions import NetworkPlanError
 from rbfenetmap.core.models import Ligand, RejectionReason
-from rbfenetmap.core.options import AlignmentOptions
+from rbfenetmap.core.options import AlignmentOptions, MappingOptions
 from rbfenetmap.core.pipeline import build_network
 
 from .conftest import make_coposed, make_ligand, scramble_frame
@@ -197,6 +197,72 @@ class TestAlignLigands:
         assert result.reference == "bza_H"
         assert result.records[0].method == "reference"
         assert result.median_rmsd == 0.0
+
+
+class TestElementMatching:
+    """The atom comparison alignment uses, and why it is not the mapper's.
+
+    A permissive atom compare is safe for mapping because ``prune_core`` and the geometry
+    gate sit behind it. Alignment has neither: the correspondence it picks becomes the
+    frame, and nothing revisits it. Left permissive, ``FindMCS`` pairs a methoxy oxygen with
+    a methyl carbon and an amide nitrogen with a hydrogen -- a fit that superposes eleven
+    atoms to 0.6 A while placing the scaffold over three angstroms out. These tests exist
+    because the fit RMSD reports that as a success.
+    """
+
+    ORTHO = {
+        "bza_H": "c1ccccc1C(=O)N",
+        "bza_Me": "Cc1ccccc1C(=O)N",
+        "bza_OMe": "COc1ccccc1C(=O)N",
+        "bza_F": "Fc1ccccc1C(=O)N",
+    }
+
+    def test_the_alignment_mcs_pairs_only_like_elements(self):
+        from rbfenetmap.core.mcs import mcs_embeddings, mcs_query
+
+        ligands = make_coposed(self.ORTHO, SCAFFOLD)
+        mobile, reference = ligands["bza_OMe"], ligands["bza_Me"]
+        options = MappingOptions()
+
+        pattern = mcs_query(mobile.mol, reference.mol, options, match_elements=True)
+        matches_mobile, matches_reference = mcs_embeddings(mobile.mol, reference.mol, pattern, options)
+        for i, j in zip(matches_mobile[0], matches_reference[0]):
+            assert mobile.mol.GetAtomWithIdx(i).GetAtomicNum() == reference.mol.GetAtomWithIdx(j).GetAtomicNum()
+
+    def test_the_mapper_keeps_its_permissive_default(self):
+        from rbfenetmap.core.mcs import mcs_query
+
+        ligands = make_coposed(self.ORTHO, SCAFFOLD)
+        mobile, reference = ligands["bza_OMe"], ligands["bza_Me"]
+        options = MappingOptions()
+        permissive = mcs_query(mobile.mol, reference.mol, options)
+        strict = mcs_query(mobile.mol, reference.mol, options, match_elements=True)
+        assert permissive.GetNumAtoms() > strict.GetNumAtoms()
+
+    def test_scatter_then_align_reproduces_the_original_geometry(self):
+        # The end-to-end property, and the sharpest regression guard available: the
+        # descriptors the gate actually reads must come back where they started.
+        from rbfenetmap.core.options import NetworkOptions
+        from rbfenetmap.core.pipeline import build_candidate
+        from rbfenetmap.plugins.mappers import create_mapper
+        from rbfenetmap.plugins.scorers import create_scorer
+
+        ligands = make_coposed(self.ORTHO, SCAFFOLD)
+        scattered = [scramble_frame(lig, seed=i + 1) for i, (_, lig) in enumerate(sorted(ligands.items()))]
+        aligned = _by_name(align_ligands(scattered).ligands)
+
+        mapper, scorer = create_mapper("mcss-e2"), create_scorer("linear")
+        options, network_options = MappingOptions(), NetworkOptions()
+        names = sorted(ligands)
+        for index, first in enumerate(names):
+            for second in names[index + 1 :]:
+                before = build_candidate(
+                    ligands[first], ligands[second], mapper, scorer, options, network_options
+                ).score.descriptors["core_rmsd"]
+                after = build_candidate(
+                    aligned[first], aligned[second], mapper, scorer, options, network_options
+                ).score.descriptors["core_rmsd"]
+                assert after == pytest.approx(before, abs=0.05), f"{first}~{second} drifted under alignment"
 
 
 class TestO3AAlignment:

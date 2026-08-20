@@ -24,7 +24,9 @@ if TYPE_CHECKING:  # pragma: no cover - imported for typing only
 __all__ = ("mcs_embeddings", "mcs_query")
 
 
-def mcs_query(mol_1: "Chem.Mol", mol_2: "Chem.Mol", options: "MappingOptions") -> "Chem.Mol | None":
+def mcs_query(
+    mol_1: "Chem.Mol", mol_2: "Chem.Mol", options: "MappingOptions", *, match_elements: bool = False
+) -> "Chem.Mol | None":
     """Return the MCS of two molecules as a query molecule.
 
     Parameters
@@ -32,6 +34,9 @@ def mcs_query(mol_1: "Chem.Mol", mol_2: "Chem.Mol", options: "MappingOptions") -
     mol_1, mol_2 : rdkit.Chem.Mol
     options : MappingOptions
         Supplies ``timeout``, the four ``FindMCS`` comparison flags, and the ring settings.
+    match_elements : bool, optional
+        Require paired atoms to be the same element. Default ``False``, which is what a
+        mapper wants. See the note below before switching it on or off.
 
     Returns
     -------
@@ -42,11 +47,22 @@ def mcs_query(mol_1: "Chem.Mol", mol_2: "Chem.Mol", options: "MappingOptions") -
 
     Notes
     -----
-    ``bondCompare=CompareAny`` is not laxness. Ligands routinely arrive from force-field
-    topologies whose bond orders are approximate -- an Amber mol2 recording a carbonyl as
-    ``C-O`` single is the everyday case, and :func:`rbfenetmap.io.loaders._prepare`
-    deliberately preserves it rather than "correcting" it. A strict bond compare would
-    silently shrink the common substructure on exactly those inputs.
+    ``bondCompare=CompareAny`` is not laxness, and is not negotiable per caller. Ligands
+    routinely arrive from force-field topologies whose bond orders are approximate -- an
+    Amber mol2 recording a carbonyl as ``C-O`` single is the everyday case, and
+    :func:`rbfenetmap.io.loaders._prepare` deliberately preserves it rather than
+    "correcting" it. A strict bond compare would silently shrink the common substructure on
+    exactly those inputs.
+
+    The *atom* comparison is a different matter, and is the one setting callers legitimately
+    disagree about. A mapper can afford ``CompareAny`` because everything downstream of it
+    is a safety net: :func:`~rbfenetmap.core.coreprune.prune_core` demotes element
+    mismatches out of the core, and the geometry gate catches whatever survives. A caller
+    with no such net -- alignment, where the correspondence *is* the answer and nothing
+    revisits it -- cannot. Left permissive there, ``FindMCS`` will pair a methoxy oxygen
+    with a methyl carbon and an amide nitrogen with a hydrogen, which superposes eleven
+    atoms to a convincing fraction of an angstrom while putting the scaffold several
+    angstroms wrong. It is precisely the failure a good-looking RMSD hides.
     """
     result = rdFMCS.FindMCS(
         [mol_1, mol_2],
@@ -57,7 +73,7 @@ def mcs_query(mol_1: "Chem.Mol", mol_2: "Chem.Mol", options: "MappingOptions") -
         completeRingsOnly=options.complete_rings_only,
         matchChiralTag=options.match_chiral_tag,
         bondCompare=rdFMCS.BondCompare.CompareAny,
-        atomCompare=rdFMCS.AtomCompare.CompareAny,
+        atomCompare=rdFMCS.AtomCompare.CompareElements if match_elements else rdFMCS.AtomCompare.CompareAny,
         timeout=options.timeout,
     )
     if not result.smartsString:

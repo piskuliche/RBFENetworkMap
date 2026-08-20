@@ -40,6 +40,8 @@ Pipeline
 
 .. automodule:: rbfenetmap.core.cbfe
 
+.. automodule:: rbfenetmap.core.clustering
+
 Plugin registry
 ---------------
 

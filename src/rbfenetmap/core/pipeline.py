@@ -22,6 +22,7 @@ from typing import Callable, Mapping, Sequence
 import networkx as nx
 
 from rbfenetmap.core.cbfe import build_cbfe_pool, make_cbfe_transformation
+from rbfenetmap.core.clustering import core_clusters
 from rbfenetmap.core.descriptors import compute_descriptors
 from rbfenetmap.core.exceptions import MappingError, RepairError
 from rbfenetmap.core.meta.mappers import AbstractMapper
@@ -375,7 +376,33 @@ def evaluate_pairs_adaptively(
     # Re-plan outside warning suppression so any genuinely unmet best-effort target is
     # visible exactly once. For a required but impossible connection this raises with
     # diagnostics after all component-bridging possibilities have been attempted.
-    return planner.plan(ligands, candidates, network_options)
+    network = planner.plan(ligands, candidates, network_options)
+    return _attach_clusters(network, ligands, candidates, mapping_options, network_options)
+
+
+def _attach_clusters(
+    network: Network,
+    ligands: Mapping[str, Ligand],
+    candidates: Sequence[Transformation],
+    mapping_options: MappingOptions,
+    network_options: NetworkOptions,
+) -> Network:
+    """Return *network* with its core-sharing partition recorded.
+
+    Applied after planning, and deliberately so. Under ``core_clusters="report"`` the
+    partition is information *about* a network that was selected without reference to it,
+    so computing it here -- rather than threading it into the planner -- is what makes
+    "report changes nothing" true by construction rather than by careful review.
+
+    Under ``"plan"`` the planner has already used the partition and recorded it itself;
+    this then leaves it alone rather than recomputing a second, possibly different one.
+    """
+    if not network_options.clusters_computed or network.clusters:
+        return network
+    clusters = core_clusters(
+        ligands, _feasible_graph(list(ligands), candidates), network_options.clustering, mapping_options
+    )
+    return replace(network, clusters=clusters)
 
 
 def _all_cbfe_candidates(ligands: Mapping[str, Ligand], network_options: NetworkOptions) -> tuple[Transformation, ...]:
@@ -498,4 +525,5 @@ def build_network(
     n_feasible = sum(1 for c in candidates if c.feasible)
     logger.info("%d of %d candidate(s) are feasible", n_feasible, len(candidates))
 
-    return planner_obj.plan(ligands, candidates, network_options)
+    network = planner_obj.plan(ligands, candidates, network_options)
+    return _attach_clusters(network, ligands, candidates, mapping_options, network_options)

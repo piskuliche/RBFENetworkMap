@@ -12,7 +12,14 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
-from rbfenetmap.core.options import AlignmentOptions, CorePruningPolicy, MappingOptions, NetworkOptions, SoftcorePolicy
+from rbfenetmap.core.options import (
+    AlignmentOptions,
+    ClusteringPolicy,
+    CorePruningPolicy,
+    MappingOptions,
+    NetworkOptions,
+    SoftcorePolicy,
+)
 
 __all__ = (
     "add_ligand_arguments",
@@ -306,6 +313,61 @@ def add_network_arguments(parser: argparse.ArgumentParser) -> None:
         help="Added to the CBFE base cost per heavy atom, summed over both ligands (default: %(default)s).",
     )
     group.add_argument(
+        "--core-clusters",
+        choices=("off", "report", "plan"),
+        default="off",
+        help=(
+            "Partition the ligands into clusters that share a common core: 'report' computes the "
+            "partition and records it without changing which edges are selected, 'plan' additionally "
+            "closes cycles within each cluster and joins clusters with single bridging edges. "
+            "Default: %(default)s, which is the behaviour that predates the option."
+        ),
+    )
+    group.add_argument(
+        "--cluster-min-core-atoms",
+        type=int,
+        default=6,
+        metavar="N",
+        help=(
+            "Ligands cluster together only while their shared core keeps at least N heavy atoms "
+            "(default: %(default)s). The main granularity knob: raising it gives more, tighter "
+            "clusters. Above the smallest ligand's heavy-atom count every cluster becomes a singleton."
+        ),
+    )
+    group.add_argument(
+        "--cluster-min-core-fraction",
+        type=float,
+        default=0.5,
+        metavar="F",
+        help="The same gate relative to the smallest ligand in the cluster (default: %(default)s).",
+    )
+    group.add_argument(
+        "--min-cluster-size",
+        type=int,
+        default=3,
+        metavar="N",
+        help=(
+            "Report a cluster smaller than N as unable to carry a cycle (default: %(default)s, the "
+            "smallest cycle). Not a rejection: the cluster still forms and is still bridged."
+        ),
+    )
+    group.add_argument(
+        "--max-cluster-size",
+        type=int,
+        metavar="N",
+        help="Refuse a merge that would put more than N ligands in one cluster.",
+    )
+    group.add_argument(
+        "--inter-cluster",
+        choices=("cbfe", "prefer-rbfe"),
+        default="cbfe",
+        help=(
+            "How clusters are joined under --core-clusters plan: 'cbfe' always spends a counterpoised "
+            "edge, 'prefer-rbfe' uses a feasible relative edge across the boundary where one exists "
+            "(default: %(default)s)."
+        ),
+    )
+    group.add_argument(
         "--progress",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -362,6 +424,15 @@ def build_network_options(args: argparse.Namespace) -> NetworkOptions:
         core_rmsd_threshold=args.core_rmsd_threshold,
         charge_change_policy=args.charge_change_policy,
     )
+    clustering = ClusteringPolicy(
+        min_core_atoms=args.cluster_min_core_atoms,
+        min_core_fraction=args.cluster_min_core_fraction,
+        min_cluster_size=args.min_cluster_size,
+        max_cluster_size=args.max_cluster_size,
+        # argparse choices use a hyphen because that is the CLI convention; the option value
+        # is an identifier. Translating here keeps the hyphen out of the library.
+        inter_cluster="prefer_rbfe" if args.inter_cluster == "prefer-rbfe" else "cbfe",
+    )
     return NetworkOptions(
         pair_strategy=args.pair_strategy,
         hub=args.hub,
@@ -387,5 +458,7 @@ def build_network_options(args: argparse.Namespace) -> NetworkOptions:
         cbfe_mode=args.cbfe,
         cbfe_base_cost=args.cbfe_base_cost,
         cbfe_atom_weight=args.cbfe_atom_weight,
+        core_clusters=args.core_clusters,
+        clustering=clustering,
         softcore=softcore,
     )

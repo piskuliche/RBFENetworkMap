@@ -683,6 +683,15 @@ class Network:
         Best-effort constraints that could not be satisfied (for example a requested
         ``edges_per_ligand`` the candidate pool could not support). Hard conflicts raise
         :class:`~rbfenetmap.core.exceptions.NetworkPlanError` instead of landing here.
+    clusters : tuple[frozenset[str], ...]
+        The core-sharing partition, when ``core_clusters`` asked for one. Empty by default
+        and under ``core_clusters="off"``, which is what lets every other planner and every
+        pre-existing caller ignore the field entirely.
+
+        A partition, not a grouping of the selected edges: every ligand appears in exactly
+        one cluster, singletons included. Populated under both ``"report"`` and ``"plan"``,
+        so its presence says the clustering *ran*, never that it steered selection --
+        ``options.clusters_drive_selection`` is what answers that.
     """
 
     ligands: Mapping[str, Ligand]
@@ -691,6 +700,7 @@ class Network:
     planner: str = "unknown"
     options: "NetworkOptions | None" = None
     unmet_constraints: tuple[str, ...] = ()
+    clusters: tuple[frozenset[str], ...] = ()
 
     def to_networkx(self) -> "nx.Graph":
         """Return the selected edges as an undirected :class:`networkx.Graph`.

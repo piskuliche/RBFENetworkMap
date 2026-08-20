@@ -17,8 +17,11 @@ __all__ = (
     "AlignmentOptions",
     "CBFEMode",
     "ChargeChangePolicy",
+    "ClusteringPolicy",
+    "CoreClusterMode",
     "CorePruningPolicy",
     "EdgeDirection",
+    "InterClusterPolicy",
     "PairEvaluation",
     "MappingOptions",
     "NetworkOptions",
@@ -37,11 +40,20 @@ EdgeDirection = Literal["fewer_softcore_first", "lexicographic", "heavier_second
 SelectionObjective = Literal["uniform_redundancy", "connectivity_then_cycles"]
 PairEvaluation = Literal["eager", "adaptive"]
 CBFEMode = Literal["off", "bridge", "cycles", "all"]
+CoreClusterMode = Literal["off", "report", "plan"]
+InterClusterPolicy = Literal["cbfe", "prefer_rbfe"]
 
 #: Ordered from least to most CBFE usage. ``cycles`` includes everything ``bridge`` does,
 #: so a mode's position in this tuple is what the planner tests against rather than a
 #: chain of equality checks that would drift as modes are added.
 CBFE_MODES: tuple[CBFEMode, ...] = ("off", "bridge", "cycles", "all")
+
+#: Ordered from least to most clustering. ``plan`` does everything ``report`` does and
+#: additionally lets the partition drive selection, so a mode's position in this tuple is
+#: what callers test against. The ladder is deliberately the same shape as
+#: :data:`CBFE_MODES`: raising the setting only ever adds behaviour, and the bottom rung is
+#: exactly the behaviour that predates the option.
+CORE_CLUSTER_MODES: tuple[CoreClusterMode, ...] = ("off", "report", "plan")
 
 
 def normalize_edge_specs(specs: tuple[str, ...] | list[str] | None) -> frozenset[tuple[str, str]]:
@@ -162,6 +174,80 @@ class SoftcorePolicy:
             raise ValueError("min_mcs_fraction must lie in [0, 1].")
         if self.min_core_atoms < 0:
             raise ValueError("min_core_atoms must be non-negative.")
+
+
+@dataclass(frozen=True)
+class ClusteringPolicy:
+    """Controls how ligands are partitioned into core-sharing clusters.
+
+    Only consulted when ``NetworkOptions.core_clusters`` is not ``"off"``.
+
+    Parameters
+    ----------
+    min_core_atoms : int
+        Heavy-atom floor on the N-way MCS of a merged group. Two clusters merge only if
+        everything in the union still shares at least this much core. The primary
+        granularity knob: raising it splits a series into more, tighter clusters.
+    min_core_fraction : float
+        The same gate expressed relative to the smallest member of the union. An absolute
+        count alone lets a large scaffold absorb a small ligand whose core is most of it,
+        which is the small-ligand blind spot ``max_softcore_atoms`` has and
+        ``max_softcore_fraction`` exists to cover.
+    min_cluster_size : int
+        Below this, a cluster is reported as too small to carry a cycle. Three is the
+        floor that means anything, since a cycle needs three vertices. Not a rejection:
+        the cluster still forms and is still bridged, and the shortfall is recorded.
+    max_cluster_size : int, optional
+        Refuse a merge that would exceed this many ligands. ``None`` means no cap.
+    inter_cluster : {"cbfe", "prefer_rbfe"}
+        How clusters are joined. ``"cbfe"`` (default) always spends a counterpoised edge,
+        which is the point of the feature: the clusters are separated *because* the
+        relative edge across the boundary would be a bad one. ``"prefer_rbfe"`` uses a
+        feasible cross-cluster RBFE edge where one exists and falls back to CBFE
+        otherwise, for a user who would rather pay in soft-core than in absolute
+        calculations.
+
+    Raises
+    ------
+    ValueError
+        If a threshold is out of range, or ``max_cluster_size`` is below
+        ``min_cluster_size`` -- a combination that can never be satisfied and would
+        otherwise show up as every cluster being reported too small.
+
+    Notes
+    -----
+    There is deliberately no ``n_clusters``. A count would need a k-selection heuristic
+    with no chemical meaning, and it would split a genuinely homogeneous series just
+    because it was asked for a number. A core-size threshold states the actual
+    requirement -- "these ligands must share this much structure to share a sub-network" --
+    is stable when ligands are added, and lets the answer be "one cluster" when that is
+    the truth.
+    """
+
+    min_core_atoms: int = 6
+    min_core_fraction: float = 0.5
+    min_cluster_size: int = 3
+    max_cluster_size: int | None = None
+    inter_cluster: InterClusterPolicy = "cbfe"
+
+    def __post_init__(self) -> None:
+        """Reject nonsensical thresholds up front."""
+        if self.min_core_atoms < 1:
+            raise ValueError("min_core_atoms must be at least 1.")
+        if not 0.0 <= self.min_core_fraction <= 1.0:
+            raise ValueError("min_core_fraction must lie in [0, 1].")
+        if self.min_cluster_size < 1:
+            raise ValueError("min_cluster_size must be at least 1.")
+        if self.inter_cluster not in ("cbfe", "prefer_rbfe"):
+            raise ValueError(f"Unknown inter_cluster {self.inter_cluster!r}. Choose 'cbfe' or 'prefer_rbfe'.")
+        if self.max_cluster_size is not None:
+            if self.max_cluster_size < 2:
+                raise ValueError("max_cluster_size must be at least 2 when set.")
+            if self.max_cluster_size < self.min_cluster_size:
+                raise ValueError(
+                    f"max_cluster_size={self.max_cluster_size} is below min_cluster_size={self.min_cluster_size}; "
+                    "no cluster could satisfy both."
+                )
 
 
 @dataclass(frozen=True)
@@ -354,6 +440,23 @@ class NetworkOptions:
         Added to ``cbfe_base_cost`` for each heavy atom summed over both ligands. A
         counterpoised calculation decouples both molecules in full, so its expense scales
         with how much there is to decouple.
+    core_clusters : {"off", "report", "plan"}
+        Whether ligands are partitioned into core-sharing clusters, and whether that
+        partition is allowed to drive selection.
+
+        - ``"off"`` (default) -- no clustering is computed and selection is exactly what
+          it was before the option existed. Costs nothing: the clustering code is never
+          entered.
+        - ``"report"`` -- the partition is computed and recorded on
+          :attr:`~rbfenetmap.core.models.Network.clusters`, and selection is *unchanged*.
+          This is how to see how a series clusters without changing the network you get.
+        - ``"plan"`` -- the partition drives selection: cycles are closed within each
+          cluster, and clusters are joined by single bridging edges.
+
+        Like :data:`CBFE_MODES` this is a ladder, so raising it only ever adds behaviour.
+    clustering : ClusteringPolicy
+        Thresholds for the partition. Only consulted when ``core_clusters`` is not
+        ``"off"``.
     softcore : SoftcorePolicy
         Feasibility policy handed to the repair.
 
@@ -388,6 +491,8 @@ class NetworkOptions:
     cbfe_mode: CBFEMode = "off"
     cbfe_base_cost: float = 8.0
     cbfe_atom_weight: float = 0.05
+    core_clusters: CoreClusterMode = "off"
+    clustering: ClusteringPolicy = field(default_factory=ClusteringPolicy)
     softcore: SoftcorePolicy = field(default_factory=SoftcorePolicy)
 
     def __post_init__(self) -> None:
@@ -424,6 +529,20 @@ class NetworkOptions:
             raise ValueError("cbfe_base_cost must not be negative.")
         if self.cbfe_atom_weight < 0:
             raise ValueError("cbfe_atom_weight must not be negative.")
+        if self.core_clusters not in CORE_CLUSTER_MODES:
+            raise ValueError(f"core_clusters must be one of {list(CORE_CLUSTER_MODES)}; got {self.core_clusters!r}.")
+        if self.core_clusters != "off" and self.cbfe_mode == "all":
+            raise ValueError(
+                f"core_clusters={self.core_clusters!r} needs atom mappings to find shared cores, but "
+                "cbfe_mode='all' skips mapping entirely -- an all-counterpoised network has no common "
+                "cores to cluster on. Use cbfe_mode='bridge' or 'cycles', or core_clusters='off'."
+            )
+        if self.core_clusters == "plan" and self.clustering.inter_cluster == "cbfe" and self.cbfe_mode == "off":
+            raise ValueError(
+                "core_clusters='plan' with inter_cluster='cbfe' needs CBFE edges to join the clusters, but "
+                "cbfe_mode='off' forbids them. Set cbfe_mode='bridge' (or higher), or use "
+                "inter_cluster='prefer_rbfe' to join clusters with relative edges where they are feasible."
+            )
         if self.pair_strategy == "star" and not self.hub:
             raise ValueError("pair_strategy='star' requires a hub ligand.")
         if self.pair_strategy == "explicit" and not self.explicit_pairs:
@@ -448,6 +567,21 @@ class NetworkOptions:
     def cbfe_closes_cycles(self) -> bool:
         """Whether CBFE edges may be spent putting ligands on a cycle."""
         return self.cbfe_mode == "cycles"
+
+    @property
+    def clusters_computed(self) -> bool:
+        """Whether the core-sharing partition is computed at all."""
+        return self.core_clusters != "off"
+
+    @property
+    def clusters_drive_selection(self) -> bool:
+        """Whether the partition changes which edges are selected.
+
+        The distinction ``report`` rests on. Everything that merely *records* the partition
+        keys on :attr:`clusters_computed`; only the planner keys on this, which is what
+        makes ``report`` output provably identical to ``off``.
+        """
+        return self.core_clusters == "plan"
 
     def check_edge_budget(self, n_ligands: int) -> None:
         """Verify ``n_edges`` can support a spanning network over *n_ligands*.

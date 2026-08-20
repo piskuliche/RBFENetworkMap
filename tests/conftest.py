@@ -211,6 +211,27 @@ def benzamides() -> dict[str, Ligand]:
 
 
 @pytest.fixture(scope="session")
+def three_scaffolds() -> dict[str, Ligand]:
+    """Twelve ligands over three scaffolds, co-posed on their shared amide.
+
+    The set core clustering is meant to separate: within a scaffold the shared core is
+    essentially the whole molecule (9-10 heavy atoms of 8-10), while across scaffolds it is
+    only the ``NC=O`` anchor (4). That gap is what a single ``min_core_atoms`` threshold
+    has to land in, so it is the fixture the partition tests are built on.
+    """
+    ligands: dict[str, str] = {}
+    for prefix, template in (
+        ("bza", "NC(=O)c1ccc({r})cc1"),
+        ("cha", "NC(=O)C1CCC({r})CC1"),
+        ("tha", "NC(=O)c1ccc({r})s1"),
+    ):
+        for suffix, group in (("H", ""), ("F", "F"), ("Cl", "Cl"), ("Me", "C")):
+            smiles = template.replace("({r})", "") if not group else template.format(r=group)
+            ligands[f"{prefix}_{suffix}"] = smiles
+    return make_coposed(ligands, "NC=O")
+
+
+@pytest.fixture(scope="session")
 def scrambled_benzamides(benzamides: dict[str, Ligand]) -> dict[str, Ligand]:
     """The co-posed benzamides, each pushed into a different frame.
 

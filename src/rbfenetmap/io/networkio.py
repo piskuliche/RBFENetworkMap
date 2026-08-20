@@ -29,7 +29,7 @@ from rbfenetmap.core.models import (
     SoftcoreRepair,
     Transformation,
 )
-from rbfenetmap.core.options import NetworkOptions, SoftcorePolicy
+from rbfenetmap.core.options import ClusteringPolicy, NetworkOptions, SoftcorePolicy
 
 __all__ = ("SCHEMA_VERSION", "dump_network", "load_network", "network_to_dict")
 
@@ -161,6 +161,10 @@ def network_to_dict(network: Network) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "planner": network.planner,
         "unmet_constraints": list(network.unmet_constraints),
+        # Sorted members, and clusters ordered largest first, so the JSON is stable across
+        # runs -- a frozenset would otherwise serialize in arbitrary order and make every
+        # re-plan look like a diff.
+        "clusters": [sorted(cluster) for cluster in network.clusters],
         "options": (
             {
                 "pair_strategy": options.pair_strategy,
@@ -178,6 +182,14 @@ def network_to_dict(network: Network) -> dict[str, Any]:
                 "cbfe_mode": options.cbfe_mode,
                 "cbfe_base_cost": options.cbfe_base_cost,
                 "cbfe_atom_weight": options.cbfe_atom_weight,
+                "core_clusters": options.core_clusters,
+                "clustering": {
+                    "min_core_atoms": options.clustering.min_core_atoms,
+                    "min_core_fraction": options.clustering.min_core_fraction,
+                    "min_cluster_size": options.clustering.min_cluster_size,
+                    "max_cluster_size": options.clustering.max_cluster_size,
+                    "inter_cluster": options.clustering.inter_cluster,
+                },
                 "softcore": {
                     "ring_policy": options.softcore.ring_policy,
                     "max_softcore_atoms": options.softcore.max_softcore_atoms,
@@ -226,6 +238,7 @@ def load_network(path: Path) -> Network:
     options = None
     if options_data:
         softcore_data = options_data.get("softcore") or {}
+        clustering_data = options_data.get("clustering") or {}
         options = NetworkOptions(
             pair_strategy=options_data.get("pair_strategy", "all_unordered_pairs"),
             hub=options_data.get("hub"),
@@ -242,6 +255,8 @@ def load_network(path: Path) -> Network:
             cbfe_mode=options_data.get("cbfe_mode", "off"),
             cbfe_base_cost=options_data.get("cbfe_base_cost", 8.0),
             cbfe_atom_weight=options_data.get("cbfe_atom_weight", 0.05),
+            core_clusters=options_data.get("core_clusters", "off"),
+            clustering=ClusteringPolicy(**clustering_data) if clustering_data else ClusteringPolicy(),
             softcore=SoftcorePolicy(**softcore_data) if softcore_data else SoftcorePolicy(),
         )
 
@@ -252,4 +267,5 @@ def load_network(path: Path) -> Network:
         planner=data.get("planner", "unknown"),
         options=options,
         unmet_constraints=tuple(data.get("unmet_constraints", ())),
+        clusters=tuple(frozenset(cluster) for cluster in data.get("clusters", ())),
     )

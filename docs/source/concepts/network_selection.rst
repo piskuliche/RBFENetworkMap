@@ -174,6 +174,112 @@ network is two ``BuildEdges`` runs, and the layout mirrors that. Each carries an
 amberstudio builds its masks from the residue roles, since there is no mapping to convey --
 so ``cbfe/`` holds only the edge list. An all-RBFE network keeps the historical flat layout.
 
+Core-based clustering
+---------------------
+
+A congeneric series planned by minimum spanning tree comes back as a **chain**. Kruskal
+compares edges one at a time, and two cheap hops always beat one dearer direct edge: on the
+benzamides, ``bza_H~bza_Et`` costs 0.626 and is perfectly feasible, but ``H-Me`` (0.305)
+plus ``Me-Et`` (0.470) wins, and the result is a diameter-4 path.
+
+Loosening ``max_softcore_atoms`` does not help, and it is worth being explicit about why,
+because it is the first thing everyone reaches for. That knob decides which edges are
+*feasible*; it never decides which are *chosen*. Between 6 and 20 the benzamide network is
+byte-identical -- same eight edges, same degree sequence, same diameter -- while the
+feasible pool sits unchanged at 33 of 36 pairs. The direct edges are there the whole time.
+Selection simply never wants them.
+
+What does change the shape is grouping ligands by the core they actually share, cycling
+each group internally, and joining the groups with single bridging edges.
+
+``core_clusters`` is a ladder, the same shape as ``cbfe_mode``:
+
+``off`` (default)
+   No partition is computed and selection is exactly what it was before the option
+   existed. Costs nothing -- the clustering code is never entered.
+
+``report``
+   The partition is computed and recorded on :attr:`~rbfenetmap.core.models.Network.clusters`,
+   and **selection is unchanged**. The network is identical to ``off``. This is how to see
+   how a series clusters without changing what you get, and the count of edges crossing a
+   cluster boundary is the diagnostic: on the benzamides it is 7 of 12.
+
+``plan``
+   The partition drives selection.
+
+Because ``report`` attaches the partition *after* planning rather than threading it through
+the planner, "report changes nothing" holds by construction rather than by review. It is
+also pinned by test, across both example sets and a spread of soft-core budgets.
+
+How the partition is found
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Clusters merge agglomeratively, seeded by the pairwise-feasible candidate graph, and gated
+on the **N-way MCS** of the merged set -- two clusters join only if *everything* in the
+union still shares enough core. :func:`~rbfenetmap.core.mcs.mcs_query_many` computes that
+directly; intersecting pairwise MCS results would not merely be slower but meaningless,
+since each pairwise substructure is its own query molecule with its own atom indexing.
+
+Seeding on the feasible graph bounds the work to cluster pairs that are adjacent in it, and
+guarantees a cluster is internally mappable -- a cluster whose members cannot be mapped to
+one another would have no sub-network to build. Merging the *best available* pair each
+round, rather than the first admissible one, makes the partition independent of iteration
+order.
+
+Sizing that shared core has one trap worth recording. Counting atoms of the MCS query
+molecule is wrong: ``atomCompare=CompareAny``, which this package uses everywhere, emits
+generic query atoms whose ``GetAtomicNum()`` is 0, and those read as heavy. It reported a
+four-benzamide core of 10 heavy atoms when the smallest member has 9 atoms in total --
+impossible, since a shared substructure has to embed in every member.
+:func:`~rbfenetmap.core.clustering.cluster_core_size` counts the match in each *real*
+molecule and takes the minimum across members; the minimum because a generic atom can match
+a hydrogen in one molecule and a heavy atom in another, and under-counting makes the gate
+decline to merge rather than merge on structure that is not there.
+
+That invariant -- the core never exceeds the smallest member -- also explains the one
+surprising failure mode: a ``min_core_atoms`` above a cluster's smallest ligand shatters it
+into singletons. ``min_core_fraction`` is the scale-free companion for series of mixed size.
+
+How clusters shape the network
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By **subtraction**. The cross-cluster relative edges are removed from the candidate graph,
+and every existing pass then runs unchanged on what is left: Kruskal cannot chain from one
+scaffold into the next, cycle closure has only intra-cluster edges to reach for, and the
+clusters are joined by exactly the bridges chosen at step (2) of the planner. Since those
+bridges are a spanning forest, no cycle ever crosses a boundary.
+
+One consequence is worth stating, because the opposite is the intuitive guess:
+:func:`~rbfenetmap.core.cbfe.select_cbfe_bridges` is **not** given the partition. It uses
+the graph's own connected components, as it always has. Removing the edges is what enforces
+the partition, so what remains to be joined is precisely whatever that left disconnected.
+Handing it the clusters instead would insist on ``c - 1`` bridges even where
+``inter_cluster="prefer_rbfe"`` had already joined two of them, and would miss a cluster
+that a banned edge had split in half.
+
+``inter_cluster`` chooses what the bridges are made of. ``"cbfe"`` (default) always spends a
+counterpoised edge -- the clusters are separate *because* the relative edge across the
+boundary would be a bad one. ``"prefer_rbfe"`` restores a **spanning** set of feasible
+cross-cluster relative edges, at most ``c - 1``; keeping the cheapest per cluster *pair*
+would restore up to ``C(c, 2)`` of them, which on ten clusters is 45 edges and most of the
+way back to the unclustered network.
+
+Degradation
+~~~~~~~~~~~
+
+A homogeneous series yields one cluster, and ``plan`` then reduces to exactly the ordinary
+network with no bridges -- trying it can never be worse than leaving it off. A cluster below
+``min_cluster_size`` cannot hold a cycle; it still forms and is still bridged, and the
+shortfall lands on ``unmet_constraints`` alongside ``edges_per_ligand`` and
+``min_cycle_coverage``.
+
+Two combinations are refused at construction rather than discovered mid-run: clustering with
+``cbfe_mode="all"``, which skips mapping entirely and so has no cores to cluster on, and
+``plan`` with ``inter_cluster="cbfe"`` under ``cbfe_mode="off"``, which would have nothing
+to bridge with. Cluster-driven selection also forces eager pair evaluation, because adaptive
+evaluation maps a deliberately partial pool and the clusters would form, split, and re-form
+as batches arrived.
+
 Knob precedence
 ---------------
 
@@ -212,6 +318,12 @@ Knob precedence
      - ``cbfe_mode``
      - Widens the pool rather than steering selection. Applied *before* cost competition,
        so it can rescue (3) without ever displacing a feasible RBFE edge.
+   * - 9
+     - ``core_clusters``
+     - ``"report"`` does not participate: it records the partition and leaves selection
+       alone. ``"plan"`` *narrows* the pool, by removing the cross-cluster relative edges
+       before any of the above runs. It is the only knob here that can make (3) harder to
+       satisfy, which is why it requires something to bridge with.
 
 Why the ``n_edges`` conflict is a hard error
 --------------------------------------------

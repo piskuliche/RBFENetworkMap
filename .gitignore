@@ -14,8 +14,9 @@ htmlcov/
 docs/build/
 docs/source/_build/
 
-# Regenerated from benzamides.smi by examples/data/make_conformers.py.
+# Regenerated from the .smi files by examples/data/make_conformers.py.
 examples/data/benzamides.sdf
+examples/data/scaffolds.sdf
 
 # Example and CLI output.
 network.json

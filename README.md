@@ -104,6 +104,7 @@ The feasible candidate graph is disconnected: 2 components.
 | `--max-cycle-size` | During cycle coverage, ignore candidate additions that would only make larger cycles than this. |
 | `--pair-evaluation adaptive` | Fingerprint-rank all pairs and run expensive mappings in batches until connectivity and redundancy targets are met. |
 | `--cbfe {off,bridge,cycles,all}` | Use counterpoised edges, which need no atom mapping and so are available between *any* two ligands. See below. |
+| `--core-clusters {off,report,plan}` | Group ligands that share a common core, and optionally let that grouping shape the network: cycles inside each cluster, single bridges between. See below. |
 | `--progress` / `--no-progress` | Show or suppress pair-mapping progress. Interactive CLI runs show it automatically. |
 | `--forced-edge` / `--banned-edge` | Absolute. A forced edge bypasses scoring but not feasibility. |
 | `--max-softcore-atoms` | A *feasibility* knob: it changes the candidate pool, not the selection. |
@@ -171,6 +172,95 @@ then expands only while degree or cycle targets remain unmet. Tune its granulari
 when a complete scored pair matrix is required. Interactive runs show completed mappings,
 elapsed time, throughput, and estimated remaining time; pass `--progress` to retain this
 display when stderr is redirected to a log.
+
+## Core-based clustering
+
+A congeneric series planned by minimum spanning tree comes back as a **chain**, because
+Kruskal compares edges one at a time and two cheap hops always beat one dearer direct edge.
+On the benzamides the result is a diameter-4 path, and it does not matter what you set
+`--max-softcore-atoms` to — 6 and 20 give byte-identical networks, because the soft-core
+budget decides which edges are *feasible*, never which are *chosen*.
+
+What does change the shape is grouping the ligands by the core they actually share, then
+building a well-cycled sub-network inside each group and joining the groups with single
+bridging edges. That is what `--core-clusters` does.
+
+| mode | clustering | selection | cost |
+|---|---|---|---|
+| `off` (default) | not computed | **exactly as before** | none |
+| `report` | computed and recorded | **exactly as before** | one N-way MCS per merge |
+| `plan` | computed | cycles within clusters, single bridges between | as `report` |
+
+The ladder is the same shape as `--cbfe`: raising it only ever adds behaviour, and the
+bottom rung is the behaviour that predates the option. **`report` is the one to try first**
+— it plans exactly the network you would have got anyway and tells you how your series
+clusters:
+
+```bash
+rbfenet plan --ligands examples/data/benzamides.sdf --core-clusters report \
+             --cluster-min-core-atoms 10 --edges-per-ligand 1 --out network.json
+```
+```
+Planned 12 edge(s) over 9 ligand(s) -> network.json
+
+3 core-sharing cluster(s) (recorded only), 7 bridging edge(s):
+#  size  core  edges  members
+-  ----  ----  -----  -----------------------------------------
+1  6     10    4      bza_CF3, bza_Cl, bza_Et, bza_F, bza_Me...
+2  2     10    1      bza_Ph, bza_cPr
+3  1     9     0      bza_H
+```
+
+Seven of the twelve edges cross a cluster boundary: the network is ignoring the structure
+of the series. `plan` spends only the two that have to, and puts the rest inside the
+clusters where the soft-cores are small:
+
+```bash
+rbfenet plan --ligands examples/data/benzamides.sdf --core-clusters plan \
+             --cluster-min-core-atoms 10 --min-cluster-size 2 \
+             --cbfe bridge --edges-per-ligand 1 --out network.json
+```
+```
+Planned 10 edge(s) over 9 ligand(s) -> network.json
+  8 RBFE, 2 CBFE
+
+3 core-sharing cluster(s) (drove selection), 2 bridging edge(s):
+#  size  core  edges  members
+-  ----  ----  -----  -----------------------------------------
+1  6     10    7      bza_CF3, bza_Cl, bza_Et, bza_F, bza_Me...
+2  2     10    1      bza_Ph, bza_cPr
+3  1     9     0      bza_H
+```
+
+Note that `--cbfe` and `--core-clusters` answer different questions and compose. `--cbfe`
+decides whether counterpoised edges may be spent at all; `--core-clusters plan` decides
+*where* the network should be split in the first place. On a set whose candidate pool is
+already disconnected — `examples/data/scaffolds.sdf` is three scaffolds sharing only an
+amide — bridging alone finds the same three groups, because there the split and the
+clustering coincide. On a connected series like the benzamides above, only clustering can
+find them.
+
+### How the partition is found
+
+Clusters merge agglomeratively, seeded by the pairwise-feasible candidate graph so a
+cluster is always internally mappable, and gated on the **N-way MCS** of the merged set:
+two clusters join only if *everything* in the union still shares enough core.
+
+| knob | effect |
+|---|---|
+| `--cluster-min-core-atoms` | Heavy-atom floor on that shared core (default 6). The main granularity knob. |
+| `--cluster-min-core-fraction` | The same gate relative to the smallest member, for series of mixed size. |
+| `--min-cluster-size` | Below this a cluster is reported as unable to carry a cycle. Not a rejection. |
+| `--max-cluster-size` | Refuse a merge that would exceed this many ligands. |
+| `--inter-cluster {cbfe,prefer-rbfe}` | Whether clusters are joined by counterpoised edges, or by a relative edge where one is feasible. |
+
+A shared core can never be larger than the smallest ligand in the group, so a threshold
+above that returns singletons. On the example set the within-scaffold cores are 9, 9, and 8
+heavy atoms on ligands of 8 to 10, against 4 across scaffolds — anywhere in that gap
+recovers the three scaffolds.
+
+**A homogeneous series comes back as one cluster**, and `plan` then reduces to exactly the
+ordinary network with no bridges. Trying it can never be worse than leaving it off.
 
 ## Python API
 

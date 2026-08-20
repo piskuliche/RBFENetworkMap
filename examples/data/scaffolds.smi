@@ -1,0 +1,20 @@
+# Three scaffolds sharing only their amide anchor, four substituents each.
+#
+# The set core clustering is meant to separate. Within a scaffold the shared core is
+# essentially the whole molecule -- 9, 9, and 8 heavy atoms on ligands of 8 to 10 -- while
+# across scaffolds it is only the NC=O anchor, at 4. A --cluster-min-core-atoms anywhere in
+# that gap recovers the three scaffolds; above the smallest ligand it returns singletons.
+#
+# Co-posed on the anchor, like benzamides.smi is co-posed on its benzamide scaffold.
+NC(=O)c1ccccc1 bza_H
+NC(=O)c1ccc(F)cc1 bza_F
+NC(=O)c1ccc(Cl)cc1 bza_Cl
+NC(=O)c1ccc(C)cc1 bza_Me
+NC(=O)C1CCCCC1 cha_H
+NC(=O)C1CCC(F)CC1 cha_F
+NC(=O)C1CCC(Cl)CC1 cha_Cl
+NC(=O)C1CCC(C)CC1 cha_Me
+NC(=O)c1cccs1 tha_H
+NC(=O)c1ccc(F)s1 tha_F
+NC(=O)c1ccc(Cl)s1 tha_Cl
+NC(=O)c1ccc(C)s1 tha_Me

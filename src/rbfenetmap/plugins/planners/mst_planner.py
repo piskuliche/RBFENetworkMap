@@ -213,7 +213,10 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
 
         if len(names) > 1 and not nx.is_connected(graph):
             if options.require_connected:
-                raise NetworkPlanError(_describe_disconnection(graph, ligands, candidates, cbfe_mode=options.cbfe_mode))
+                raise NetworkPlanError(
+                    _describe_disconnection(graph, ligands, candidates, cbfe_mode=options.cbfe_mode),
+                    rejected=[c for c in candidates if not c.feasible],
+                )
             unmet.append(f"network is disconnected ({nx.number_connected_components(graph)} components)")
 
         selected = self._spanning_edges(graph, options)

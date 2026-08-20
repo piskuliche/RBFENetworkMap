@@ -23,6 +23,23 @@ __all__ = ("render_network_svg",)
 
 _CBFE = EdgeKind.CBFE.value
 
+#: Node fills for core-sharing clusters, cycled if there are more clusters than entries.
+#: Drawn from the Okabe-Ito qualitative set, which stays distinguishable under the common
+#: forms of colour blindness. The first entry is the ordinary node blue, so a series that
+#: comes back as a single cluster looks exactly like an unclustered one rather than
+#: gratuitously different. Yellow is omitted: it has too little contrast against the white
+#: page for a filled circle.
+_CLUSTER_FILLS: tuple[str, ...] = (
+    "#4a90d9",
+    "#e69f00",
+    "#009e73",
+    "#cc79a7",
+    "#56b4e9",
+    "#d55e00",
+    "#0072b2",
+    "#8c6d31",
+)
+
 
 def _normalize(positions: dict[str, tuple[float, float]]) -> dict[str, tuple[float, float]]:
     """Rescale a layout into the unit square."""
@@ -143,6 +160,11 @@ def render_network_svg(
     Counterpoised edges are drawn violet, because they are a different experiment rather
     than a more expensive version of the same one.
 
+    When the network carries a core-sharing partition, nodes are filled by cluster. As with
+    the counterpoised edges, colour never carries it alone -- every node names its cluster
+    in the tooltip, and with more clusters than palette entries the fills repeat while the
+    tooltips stay unique.
+
     The particular violet is chosen, not decorative. It is the one hue region the report's
     palette does not already spend on something else -- blue is nodes, orange is soft-core
     and warnings, red is an unconnected ligand -- so it cannot be misread as any of those.
@@ -193,8 +215,17 @@ def render_network_svg(
         ".node{fill:#4a90d9;stroke:#22384f;stroke-width:1.5}"
         ".node-isolated{fill:#ffffff;stroke:#c0392b;stroke-width:2}"
         ".label{font-size:12px;fill:#1c2733;text-anchor:middle}"
-        "</style>",
+        # Only the fills actually used. An unclustered network's SVG is then byte-identical
+        # to what it was before clusters existed, which is what keeps the rendering tests
+        # that predate this feature meaningful rather than merely still passing.
+        + "".join(
+            f".node-cluster-{index}{{fill:{_CLUSTER_FILLS[index]}}}"
+            for index in sorted({i % len(_CLUSTER_FILLS) for i in range(len(network.clusters))})
+        )
+        + "</style>",
     ]
+
+    cluster_of = {name: index for index, cluster in enumerate(network.clusters) for name in cluster}
 
     for source, target, data in graph.edges(data=True):
         x1, y1 = place(source)
@@ -218,10 +249,17 @@ def render_network_svg(
         x, y = place(node)
         isolated = graph.degree(node) == 0
         css = "node-isolated" if isolated else "node"
+        cluster = cluster_of.get(node)
+        # The isolated style is deliberately not overridden. A hollow red node says the
+        # ligand is attached to nothing at all, which the reader needs before they need to
+        # know which cluster it nominally belongs to.
+        if cluster is not None and not isolated:
+            css = f"node node-cluster-{cluster % len(_CLUSTER_FILLS)}"
         radius = 9 + min(6, math.sqrt(graph.degree(node)) * 2)
+        cluster_note = f", cluster {cluster + 1}" if cluster is not None else ""
         parts.append(
             f'<circle class="{css}" cx="{x:.1f}" cy="{y:.1f}" r="{radius:.1f}">'
-            f"<title>{html.escape(node)} (degree {graph.degree(node)})</title></circle>"
+            f"<title>{html.escape(node)} (degree {graph.degree(node)}{cluster_note})</title></circle>"
         )
         label = node[len(prefix) :] if prefix and node.startswith(prefix) else node
         parts.append(

@@ -425,3 +425,61 @@ class TestClusterDrivenSelection:
             )
         network = build_network(benzamides, planner="complete", network_options=NetworkOptions(core_clusters="report"))
         assert len(network.clusters) == 1
+
+
+class TestClusterVisualisation:
+    """Clusters reach the SVG and the HTML report, and never by colour alone."""
+
+    @staticmethod
+    def _clustered(ligands):
+        """A network whose benzamides fall into more than one cluster."""
+        return build_network(
+            ligands,
+            network_options=NetworkOptions(
+                core_clusters="plan",
+                cbfe_mode="bridge",
+                edges_per_ligand=1,
+                clustering=ClusteringPolicy(min_core_atoms=10, min_cluster_size=2),
+            ),
+        )
+
+    def test_svg_fills_nodes_by_cluster(self, benzamides):
+        """One fill class per cluster, and only the ones actually used are defined."""
+        import re
+
+        from rbfenetmap.viz.network_svg import render_network_svg
+
+        network = self._clustered(benzamides)
+        svg = render_network_svg(network)
+        applied = set(re.findall(r'class="node (node-cluster-\d+)"', svg))
+        defined = set(re.findall(r"\.(node-cluster-\d+)\{", svg))
+        assert applied, "no node was filled by cluster"
+        assert applied == defined, "the style block and the nodes disagree"
+        assert len(defined) == len(network.clusters)
+
+    def test_svg_names_the_cluster_in_the_tooltip(self, benzamides):
+        """Colour is never the only signal -- the same rule the CBFE edges follow."""
+        import re
+
+        from rbfenetmap.viz.network_svg import render_network_svg
+
+        svg = render_network_svg(self._clustered(benzamides))
+        assert len(re.findall(r"cluster \d+\)", svg)) == len(self._clustered(benzamides).ligands)
+
+    def test_unclustered_svg_is_untouched(self, benzamides):
+        """A network with no partition renders exactly as it did before the feature."""
+        from rbfenetmap.viz.network_svg import render_network_svg
+
+        svg = render_network_svg(build_network(benzamides, network_options=NetworkOptions(edges_per_ligand=1)))
+        assert "node-cluster" not in svg
+
+    def test_report_lists_the_clusters(self, benzamides):
+        """The SVG palette repeats past eight clusters, so the list is what resolves them."""
+        from rbfenetmap.viz.gallery import render_report
+
+        network = self._clustered(benzamides)
+        html = render_report(network)
+        assert "Core clusters" in html
+        assert html.count("<strong>Cluster ") == len(network.clusters)
+        for name in network.ligands:
+            assert name in html

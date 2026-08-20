@@ -30,6 +30,7 @@ body { font-family: system-ui, -apple-system, sans-serif; margin: 0 auto; max-wi
 h1, h2 { line-height: 1.2; }
 .intro { max-width: 70ch; }
 .summary { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1.5rem 0; }
+.clusters { line-height: 1.6; }
 .stat { border: 1px solid #8883; border-radius: 8px; padding: .75rem 1rem; min-width: 8rem; }
 .stat .value { font-size: 1.6rem; font-weight: 600; }
 .stat .label { font-size: .8rem; opacity: .75; text-transform: uppercase; letter-spacing: .04em; }
@@ -143,6 +144,11 @@ def render_report(network: "Network", *, title: str = "RBFE network", show_indic
         parts.append(
             f"<div class='stat'><div class='value'>{len(cbfe_edges)}</div><div class='label'>CBFE edges</div></div>"
         )
+    if network.clusters:
+        parts.append(
+            f"<div class='stat'><div class='value'>{len(network.clusters)}</div>"
+            "<div class='label'>Core clusters</div></div>"
+        )
     parts += [
         f"<div class='stat'><div class='value'>{len(repaired)}</div><div class='label'>Repaired</div></div>",
         f"<div class='stat'><div class='value'>{len(rejected)}</div><div class='label'>Rejected</div></div>",
@@ -154,6 +160,16 @@ def render_report(network: "Network", *, title: str = "RBFE network", show_indic
         parts.append("<div class='warn'><strong>Unmet constraints</strong><ul>")
         parts += [f"<li>{_escape(c)}</li>" for c in network.unmet_constraints]
         parts.append("</ul></div>")
+
+    if network.clusters:
+        # Named in text, not just coloured in the diagram. The SVG fills repeat once there
+        # are more clusters than palette entries, so this list is what actually resolves
+        # which ligand is in which -- and it is the only place the shared core size appears.
+        parts.append("<h2>Core clusters</h2><ul class='clusters'>")
+        for index, cluster in enumerate(sorted(network.clusters, key=lambda c: (-len(c), sorted(c))), start=1):
+            members = ", ".join(_escape(name) for name in sorted(cluster))
+            parts.append(f"<li><strong>Cluster {index}</strong> ({len(cluster)}): {members}</li>")
+        parts.append("</ul>")
 
     parts += [
         "<h2>Network</h2>",

@@ -77,6 +77,27 @@ To generate a browsable HTML report alongside the JSON network:
    rbfenet plan --ligands ligands.sdf --out network.json \
                 --export html --export-dir ./out
 
+Ligand alignment
+----------------
+
+``--align``, ``--align-reference``, ``--align-min-atoms``, and ``--write-aligned`` belong
+to the shared ligand-input group, so ``plan``, ``score``, and ``map`` all accept them with
+the same meaning.
+
+.. code-block:: bash
+
+   rbfenet plan --ligands prepared_from_abfe/ --align \
+                --write-aligned aligned/ --out network.json
+
+Bare ``--align`` selects the maximum-common-substructure method; ``--align o3a`` selects
+Open3DAlign for sets with no substructure large enough to fit on. The per-ligand report is
+written to stderr, so ``rbfenet score --align --format json`` still produces a parseable
+document on stdout.
+
+If a run rejects every candidate for ``core_geometry_mismatch`` and ``--align`` was not
+given, the failure message ends with a note suggesting it. See :ref:`aligning-ligands` for
+how to read the report, and for what alignment does and does not change.
+
 score
 -----
 

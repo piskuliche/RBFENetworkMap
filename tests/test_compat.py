@@ -136,6 +136,8 @@ class TestCLIConflicts:
             ("--scorer", "lomaplike"),
             ("--min-cycle-coverage", "0.5"),
             ("--pair-evaluation", "adaptive"),
+            ("--cluster-by", "charge"),
+            ("--cluster-bridges", "3"),
         ],
     )
     def test_pinned_knob_is_refused(self, tmp_path, capsys, flag, value):

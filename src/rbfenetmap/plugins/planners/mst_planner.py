@@ -29,6 +29,23 @@ Expressing eligibility as presence rather than as a predicate threaded through t
 methods is what keeps the stages themselves unchanged. The one place the distinction is
 read directly is cycle-closure ranking, which prefers an RBFE edge over a CBFE edge that
 would buy the same coverage.
+
+Clustered planning
+------------------
+``cluster_by`` is likewise a knob on this planner rather than a planner of its own, and for
+the same reason: a user who partitions their ligands still wants cycle coverage, degree
+targets, and CBFE bridging, and a ``ClusteredPlanner`` would have to reimplement all three
+to offer any of them.
+
+It acts by *removing* candidates, at one point, before anything is selected: the
+cross-cluster edges are pruned from the graph down to the ``cluster_bridges`` most
+trustworthy crossings per joined cluster pair, chosen by the same
+:func:`~rbfenetmap.core.cbfe.select_bridges` sweep the CBFE machinery uses. Every stage
+downstream then runs unchanged and simply cannot spend on a crossing, which is what turns
+``n ln n`` into ``sum_i n_i ln n_i``. The kept crossings are added to the selection
+explicitly rather than left to the spanning pass, because with ``cluster_bridges=2`` only
+one of the two would survive Kruskal and the second is the entire point -- it is what puts
+the crossing on a cycle.
 """
 
 from __future__ import annotations
@@ -38,7 +55,8 @@ from typing import ClassVar, Mapping, Sequence
 
 import networkx as nx
 
-from rbfenetmap.core.cbfe import build_cbfe_pool, make_cbfe_transformation, select_cbfe_bridges
+from rbfenetmap.core.cbfe import build_cbfe_pool, make_cbfe_transformation, select_bridges, select_cbfe_bridges
+from rbfenetmap.core.clustering import assign_clusters
 from rbfenetmap.core.exceptions import NetworkPlanError
 from rbfenetmap.core.meta.planners import AbstractNetworkPlanner
 from rbfenetmap.core.models import EDGE_SEPARATOR, EdgeKind, Ligand, Network, Transformation
@@ -189,6 +207,14 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
         for pair, edge in feasible.items():
             graph.add_edge(pair[0], pair[1], weight=edge.score.total, kind=EdgeKind.RBFE.value)
 
+        # (0) Clustering, before anything is selected and before the CBFE steps below, so
+        # that every later stage sees a graph in which the crossings are already the few
+        # that were worth buying. A CBFE bridge is still reachable afterwards, and has to
+        # be: pruning can leave a cluster the RBFE pool never connected internally.
+        cluster_crossings: set[tuple[str, str]] = set()
+        if options.cluster_by != "none":
+            cluster_crossings = self._apply_clustering(graph, ligands, options, unmet)
+
         def adopt(pair: tuple[str, str]) -> None:
             """Move one pair out of the pool and onto the graph as a CBFE edge.
 
@@ -221,6 +247,12 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
 
         selected = self._spanning_edges(graph, options)
 
+        # A cluster crossing is a selection, not a candidate. Kruskal would take one of the
+        # `cluster_bridges` edges between two clusters and discard the rest as redundant --
+        # and "redundant" is precisely what makes the second one worth having, since it is
+        # what puts the crossing on a cycle.
+        selected |= {pair for pair in cluster_crossings if graph.has_edge(*pair)}
+
         # (3) The rest of the pool, after the spanning tree is fixed. Cycle closure may
         # spend these; the degree-raising pass filters them back out.
         if options.cbfe_closes_cycles:
@@ -247,6 +279,77 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
         )
         network.validate(require_connected=options.require_connected)
         return network
+
+    def _apply_clustering(
+        self, graph: nx.Graph, ligands: Mapping[str, Ligand], options: NetworkOptions, unmet: list[str]
+    ) -> set[tuple[str, str]]:
+        """Prune *graph* down to intra-cluster edges plus a few chosen crossings.
+
+        Mutates *graph* in place, which is why it runs before any selection: after this
+        returns, "the candidate graph" simply is the clustered candidate graph, and the
+        spanning and redundancy passes need to know nothing about clusters at all.
+
+        Parameters
+        ----------
+        graph : networkx.Graph
+            The feasible RBFE graph. **Modified**: cross-cluster edges beyond the chosen
+            crossings are removed.
+        ligands : Mapping[str, Ligand]
+        options : NetworkOptions
+            Supplies ``cluster_by`` and ``cluster_bridges``.
+        unmet : list[str]
+            Appended to when a crossing has to be restored -- see below.
+
+        Returns
+        -------
+        set[tuple[str, str]]
+            The crossings kept, which the caller adds to the selection outright.
+
+        Notes
+        -----
+        Pruning is an optimisation, and an optimisation that changes the *answer* -- here by
+        making a connected network impossible -- is a bug, exactly as it is for the
+        fingerprint prefilter in :func:`~rbfenetmap.core.pairs.reconnect_pairs`. A cluster
+        the RBFE pool never connected internally would otherwise be split apart by removing
+        the crossings that were holding it together. So a graph that was connected before
+        pruning is restored to connected afterwards, cheapest crossing first, and the
+        restoration is reported rather than performed silently: the user asked for a
+        partition and did not entirely get one, which is a fact about their ligand set worth
+        seeing.
+        """
+        partition = assign_clusters(ligands, options.cluster_by)
+        crossings = {
+            pair for pair in (tuple(sorted(edge)) for edge in graph.edges) if partition[pair[0]] != partition[pair[1]]
+        }
+        if not crossings:
+            return set()
+
+        cost = {pair: graph.edges[pair]["weight"] for pair in crossings}
+        keep = set(select_bridges(partition, ligands, cost, graph=graph, n_per_pair=options.cluster_bridges)) | (
+            options.forced_pairs & crossings
+        )
+
+        was_connected = graph.number_of_nodes() < 2 or nx.is_connected(graph)
+        dropped = sorted(crossings - keep, key=lambda pair: (cost[pair], pair))
+        graph.remove_edges_from(dropped)
+
+        restored: list[tuple[str, str]] = []
+        if was_connected:
+            for pair in dropped:
+                if nx.is_connected(graph):
+                    break
+                if nx.has_path(graph, pair[0], pair[1]):
+                    continue
+                graph.add_edge(pair[0], pair[1], weight=cost[pair], kind=EdgeKind.RBFE.value)
+                restored.append(pair)
+        if restored:
+            unmet.append(
+                f"cluster_by={options.cluster_by!r} left the network disconnected; "
+                f"{len(restored)} cross-cluster edge(s) restored to span the ligands: "
+                f"{[f'{a}{EDGE_SEPARATOR}{b}' for a, b in restored[:6]]}"
+                f"{'...' if len(restored) > 6 else ''}"
+            )
+        return keep | set(restored)
 
     def _check_forced(
         self,

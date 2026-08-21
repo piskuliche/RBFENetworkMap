@@ -24,7 +24,10 @@ classifiers = [
 # other side, and both resolutions work.
 dependencies = [
   "rdkit>=2023.03",
-  "networkx>=3.0",
+  # 3.1 rather than 3.0: core.diagnostics.count_cycles needs simple_cycles's length_bound,
+  # which is what keeps a report over a dense network from enumerating exponentially many
+  # cycles. Undirected support for it landed in 3.1.
+  "networkx>=3.1",
   "numpy",
   "scipy>=1.10",
 ]

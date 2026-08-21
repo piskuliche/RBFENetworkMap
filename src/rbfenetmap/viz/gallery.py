@@ -14,6 +14,8 @@ from __future__ import annotations
 import html
 from typing import TYPE_CHECKING
 
+from rbfenetmap.core.cost import network_cost_summary
+from rbfenetmap.core.diagnostics import summarize
 from rbfenetmap.core.models import EdgeKind
 from rbfenetmap.viz.depict import render_edge_svg
 from rbfenetmap.viz.network_svg import render_network_svg
@@ -96,6 +98,51 @@ def _edge_summary(edge: "Transformation") -> str:
     )
 
 
+#: The seed the report's robustness estimate is run with. Fixed rather than exposed: two
+#: renders of the same network file have to produce the same document, or the HTML report
+#: stops being something you can diff or attach to a ticket. A user who wants to vary it is
+#: asking a research question, and ``rbfenet diagnose --seed`` is where that lives.
+_REPORT_SEED = 0
+
+
+def _diagnostics_section(network: "Network") -> list[str]:
+    """Render the network-level metrics table.
+
+    The report used to be a picture with no numbers beside it, which left the reader to
+    eyeball whether a network was well shaped. These are the numbers that answer that:
+    diameter, degree spread, short cycles, and what survives a failed edge.
+    """
+    report = summarize(network, seed=_REPORT_SEED)
+    degrees, robustness, budget = report["degrees"], report["robustness"], report["budget"]
+    totals = network_cost_summary(network)
+
+    rows = [
+        ("Total cost", f"{totals['score']:.3f} scorer units"),
+        ("Estimated machine time", f"{totals['gpu_hours']:.1f} GPU-hours (about ${totals['price']:.2f})"),
+        ("Mean cost per edge", f"{report['efficiency']:.3f}"),
+        ("Degree", f"min {degrees.minimum} &middot; mean {degrees.mean:.2f} &middot; max {degrees.maximum}"),
+        ("Isolated ligands", ", ".join(degrees.isolated) or "none"),
+        ("Diameter", "disconnected" if report["diameter"] is None else str(report["diameter"])),
+        ("Short cycles", f"{report['n_cycles']} of length &le; {report['max_cycle_length']}"),
+        (
+            "Robustness",
+            f"{robustness.connected_fraction:.0%} of {robustness.n_repeats} trials stay connected at "
+            f"{robustness.failure_rate:.0%} edge failure; {robustness.mean_ligands_retained:.1f} ligands "
+            "retained on average",
+        ),
+    ]
+    parts = [
+        "<h2>Diagnostics</h2>",
+        "<p class='meta'>Network-level metrics. Machine time is estimated from published per-edge "
+        "measurements and is a report only -- it played no part in choosing these edges.</p>",
+        "<div class='scroll'><table><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>",
+    ]
+    parts += [f"<tr><td>{_escape(label)}</td><td>{value}</td></tr>" for label, value in rows]
+    parts.append("</tbody></table></div>")
+    parts.append(f"<p class='meta'>{_escape(budget.message)}</p>")
+    return parts
+
+
 def render_report(network: "Network", *, title: str = "RBFE network", show_indices: bool = False) -> str:
     """Return a complete, self-contained HTML document describing *network*.
 
@@ -154,6 +201,8 @@ def render_report(network: "Network", *, title: str = "RBFE network", show_indic
         parts.append("<div class='warn'><strong>Unmet constraints</strong><ul>")
         parts += [f"<li>{_escape(c)}</li>" for c in network.unmet_constraints]
         parts.append("</ul></div>")
+
+    parts += _diagnostics_section(network)
 
     parts += [
         "<h2>Network</h2>",

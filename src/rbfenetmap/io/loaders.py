@@ -16,13 +16,18 @@ from typing import Iterable, Sequence
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
-from rbfenetmap.core.models import Ligand
+from rbfenetmap.core.models import EDGE_SEPARATOR, Ligand
 
-__all__ = ("load_ligands", "load_sdf", "load_smiles", "sanitize_name")
+__all__ = ("load_fepplus_network", "load_ligands", "load_orion_network", "load_sdf", "load_smiles", "sanitize_name")
 
 logger = logging.getLogger(__name__)
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.+-]+")
+
+#: One run of two or more ``>`` characters, which is how both foreign edge formats write
+#: their arrow. Matched as a whole run rather than split on so that an FEP+ ``>>>`` line
+#: cannot be read by the Orion parser as ``>>`` plus a stray ``>`` on the ligand name.
+_ARROW = re.compile(r">{2,}")
 
 #: Extensions recognised when a directory is given.
 _MOLECULE_SUFFIXES = (".sdf", ".mol", ".mol2", ".smi")
@@ -223,3 +228,135 @@ def load_ligands(paths: Iterable[Path] | Sequence[str], *, name_property: str = 
             )
         seen[ligand.name] = ligand.source
     return ligands
+
+
+def _parse_edge_file(path: Path, arrow: str, tool: str) -> tuple[str, ...]:
+    """Parse a foreign edge list into this package's ``"a~b"`` specifications.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+    arrow : str
+        The exact arrow the format writes between two ligand names, ``">>>"`` or ``">>"``.
+    tool : str
+        Named in error messages, so a user who handed an Orion file to the FEP+ loader is
+        told which parser rejected it and why.
+
+    Returns
+    -------
+    tuple[str, ...]
+        In file order, duplicates collapsed. Order is preserved rather than sorted because
+        an imported map is a decision someone already made, and the order they wrote it in
+        is the only trace of their reasoning that survives the import.
+
+    Raises
+    ------
+    ValueError
+        If a non-comment line does not hold exactly one arrow of the expected length, names
+        an empty ligand, or names the same ligand twice; or if the file yields no edges at
+        all. Skipping a bad line silently would import a *different* network from the one on
+        disk, which is worse than importing none.
+
+    Notes
+    -----
+    The arrow is matched as a whole run of ``>``. Splitting on the literal would let the
+    Orion parser read an FEP+ ``A >>> B`` line as ``A`` to ``> B`` -- a plausible-looking
+    edge to a ligand that does not exist -- rather than refusing the file.
+
+    Both formats optionally prefix a name with an internal identifier and a colon
+    (``h1a2b3:ligand_7``); only the part after the last colon is a ligand name.
+
+    Names go through :func:`sanitize_name`, because that is what every ligand loader here
+    does to the names it reads. An imported edge that kept a character the ligand loader
+    would have replaced would name a vertex that does not exist, and the ``explicit``
+    planner would refuse the whole network over it.
+    """
+    specs: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for number, raw in enumerate(path.read_text().splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        arrows = _ARROW.findall(line)
+        if len(arrows) != 1 or arrows[0] != arrow:
+            found = arrows[0] if len(arrows) == 1 else f"{len(arrows)} arrows"
+            raise ValueError(
+                f"{path}:{number}: a {tool} edge line is '<ligand> {arrow} <ligand>', but this line has "
+                f"{found}. Offending line: {raw!r}"
+            )
+        left, right = (field.strip().rpartition(":")[2].strip() for field in line.split(arrow))
+        if not left or not right:
+            raise ValueError(f"{path}:{number}: a {tool} edge line names an empty ligand. Offending line: {raw!r}")
+        source, target = sanitize_name(left, left), sanitize_name(right, right)
+        if source == target:
+            raise ValueError(f"{path}:{number}: a {tool} edge names {source!r} on both sides.")
+        key = (min(source, target), max(source, target))
+        if key in seen:
+            continue
+        seen.add(key)
+        specs.append(f"{source}{EDGE_SEPARATOR}{target}")
+    if not specs:
+        raise ValueError(f"{path} contains no {tool} edges. Check that it is the edge list and not a log file.")
+    return tuple(specs)
+
+
+def load_fepplus_network(path: Path) -> tuple[str, ...]:
+    """Read a Schrodinger FEP+ edge list into ``explicit_pairs`` specifications.
+
+    FEP+ writes its planned map as a text file of ``A >>> B`` lines, each name optionally
+    prefixed by an internal hash and a colon. openfe ships the equivalent as
+    ``load_fepplus_network``; this is the same job in this package's vocabulary, and it
+    exists so that a group with an existing map can evaluate this tool against it rather
+    than having to start from nothing.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+
+    Returns
+    -------
+    tuple[str, ...]
+        ``"a~b"`` specifications, ready to hand to
+        :class:`~rbfenetmap.core.options.NetworkOptions` as ``explicit_pairs`` alongside
+        ``pair_strategy="explicit"`` and the ``explicit`` planner.
+
+    Raises
+    ------
+    ValueError
+        If a line is unparsable or the file holds no edges.
+
+    Notes
+    -----
+    Only the *topology* is imported; FEP+'s atom mappings are not read, and this package
+    maps every imported pair itself. That is the point rather than a limitation -- the main
+    reason to import a foreign map is to put it through this package's own feasibility
+    rules -- but it does mean an edge FEP+ was happy with can come back rejected. The
+    ``explicit`` planner says so loudly instead of dropping it.
+    """
+    return _parse_edge_file(Path(path), ">>>", "FEP+")
+
+
+def load_orion_network(path: Path) -> tuple[str, ...]:
+    """Read an OpenEye Orion NES edge list into ``explicit_pairs`` specifications.
+
+    Orion writes ``A >> B`` lines, with ``#`` comments. Two arrows rather than three is the
+    only structural difference from the FEP+ format, which is exactly why these are two
+    entry points over one parser rather than one loader that sniffs: a guess that read an
+    FEP+ line as an Orion edge would import a network nobody planned.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+
+    Returns
+    -------
+    tuple[str, ...]
+        ``"a~b"`` specifications. See :func:`load_fepplus_network` for how to use them and
+        for what is deliberately not imported.
+
+    Raises
+    ------
+    ValueError
+        If a line is unparsable or the file holds no edges.
+    """
+    return _parse_edge_file(Path(path), ">>", "Orion")

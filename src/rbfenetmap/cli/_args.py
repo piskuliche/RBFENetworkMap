@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
+from rbfenetmap.core.cost import COST_UNITS
 from rbfenetmap.core.options import (
     COMPAT_LEVELS,
     AlignmentOptions,
@@ -24,6 +25,7 @@ from rbfenetmap.core.options import (
 __all__ = (
     "COMPAT_CLI_PINS",
     "add_compat_argument",
+    "add_cost_units_argument",
     "add_ligand_arguments",
     "add_mapping_arguments",
     "add_network_arguments",
@@ -136,6 +138,28 @@ def add_compat_argument(parser: argparse.ArgumentParser) -> None:
             "intent (--hub, --banned-edge), input preparation (--align) and operational "
             "flags (--jobs, --progress) stay available; naming an algorithmic knob "
             "alongside this is a contradiction and is refused."
+        ),
+    )
+
+
+def add_cost_units_argument(parser: argparse.ArgumentParser) -> None:
+    """Add ``--cost-units``, which chooses how a cost *report* is expressed.
+
+    Deliberately absent from :data:`COMPAT_CLI_PINS` and from
+    :class:`~rbfenetmap.core.options.NetworkOptions`. It is a display unit, on the same
+    footing as ``--format`` or ``--show-rejected``: no planner reads it, no edge moves
+    because of it, and pinning it would refuse ``--compat v0.4 --cost-units gpu_hours``, a
+    combination with no contradiction in it at all. Reproducing a released behaviour is a
+    statement about which network comes out, not about what units it is printed in.
+    """
+    parser.add_argument(
+        "--cost-units",
+        choices=COST_UNITS,
+        default="score",
+        help=(
+            "Units for the reported network cost (default: %(default)s). 'score' is the scorer's own "
+            "difficulty scale, which orders edges; 'gpu_hours' is estimated machine time from published "
+            "per-edge measurements, plus a price. Reporting only -- it cannot change which edges are chosen."
         ),
     )
 

@@ -18,6 +18,7 @@ from typing import Sequence
 from rbfenetmap import __version__
 from rbfenetmap.cli import commands
 from rbfenetmap.cli._args import (
+    add_cost_units_argument,
     add_ligand_arguments,
     add_mapping_arguments,
     add_network_arguments,
@@ -58,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_network_arguments(plan)
     plan.add_argument("--out", type=Path, default=Path("network.json"), help="Network JSON output path.")
     plan.add_argument("--show-rejected", action="store_true", help="List rejected candidates and why.")
+    add_cost_units_argument(plan)
     plan.add_argument("--export", nargs="+", metavar="NAME", help="Also run these exporters.")
     plan.add_argument("--export-dir", type=Path, default=Path("."), help="Directory for exports.")
     plan.add_argument("--exporter-opt", action="append", metavar="K=V", help="Exporter option, repeatable.")
@@ -103,6 +105,36 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--title", default="RBFE network", help="Report title.")
     report.add_argument("--show-indices", action="store_true", help="Label atoms with their indices.")
 
+    # diagnose -----------------------------------------------------------------
+    diagnose = subparsers.add_parser("diagnose", help="Report network-level metrics for a planned network.")
+    diagnose.add_argument("--network", type=Path, required=True, help="Network JSON from `rbfenet plan`.")
+    diagnose.add_argument(
+        "--failure-rate",
+        type=float,
+        default=0.05,
+        metavar="P",
+        help="Per-edge failure probability used by the robustness estimate (default: %(default)s).",
+    )
+    diagnose.add_argument(
+        "--repeats", type=int, default=100, metavar="N", help="Monte-Carlo trials (default: %(default)s)."
+    )
+    diagnose.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Seed for the robustness estimate (default: %(default)s). The same seed always gives the same number.",
+    )
+    diagnose.add_argument(
+        "--max-cycle-length",
+        type=int,
+        default=4,
+        metavar="N",
+        help="Longest cycle counted (default: %(default)s). Short cycles are the ones that localise an error.",
+    )
+    add_cost_units_argument(diagnose)
+    diagnose.add_argument("--format", choices=("table", "json"), default="table")
+
     # plugins ------------------------------------------------------------------
     plugins = subparsers.add_parser("plugins", help="List plugins and their availability.")
     plugins.add_argument("--kind", choices=("mapper", "scorer", "planner", "exporter"))
@@ -128,6 +160,7 @@ _HANDLERS = {
     "report": commands.cmd_report,
     "plugins": commands.cmd_plugins,
     "inspect": commands.cmd_inspect,
+    "diagnose": commands.cmd_diagnose,
 }
 
 

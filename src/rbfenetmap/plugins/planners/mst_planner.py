@@ -29,6 +29,16 @@ Expressing eligibility as presence rather than as a predicate threaded through t
 methods is what keeps the stages themselves unchanged. The one place the distinction is
 read directly is cycle-closure ranking, which prefers an RBFE edge over a CBFE edge that
 would buy the same coverage.
+
+Invented vertices
+-----------------
+Some of the ligands handed to :meth:`MSTRedundancyPlanner.plan` may be ones the pipeline
+invented, marked by :attr:`~rbfenetmap.core.models.Ligand.synthetic`. The planner treats
+them as ordinary vertices in every stage but two: they are excluded from the
+``edges_per_ligand`` target and from the ``min_cycle_coverage`` denominator, because the
+user asked for redundancy on the compounds whose affinity they care about and an
+intermediate is scaffolding. They are emphatically not excluded from the *pool*, and they
+may carry cycles. A network with no synthetic vertices is unaffected in every respect.
 """
 
 from __future__ import annotations
@@ -87,7 +97,12 @@ def _charge_classes(ligands: Mapping[str, Ligand]) -> dict[int, list[str]]:
 
 
 def _describe_disconnection(
-    graph: nx.Graph, ligands: Mapping[str, Ligand], candidates: Sequence[Transformation], *, cbfe_mode: CBFEMode = "off"
+    graph: nx.Graph,
+    ligands: Mapping[str, Ligand],
+    candidates: Sequence[Transformation],
+    *,
+    cbfe_mode: CBFEMode = "off",
+    intermediates_mode: str = "off",
 ) -> str:
     """Build an actionable message explaining why the pool is disconnected.
 
@@ -102,6 +117,14 @@ def _describe_disconnection(
     then means every pair that could have crossed a gap was banned, and that is what the
     message says instead. The rejected-candidate listing above stays useful either way: it
     still explains why no *RBFE* bridge was available.
+
+    *intermediates_mode* earns its own paragraph for the same reason. A user who switched
+    generation on and still got a disconnection has already spent the compute; telling them
+    only that the pool is disconnected hides the one fact they need, which is that every gap
+    named here was offered to a generator and refused. The per-gap reasons live on the
+    attempt record rather than here, because the planner is handed a pool and not a history
+    -- :func:`~rbfenetmap.core.pipeline.build_network` appends them to this message, exactly
+    as ``cmd_plan`` appends its geometry hint.
     """
     components = [sorted(c) for c in nx.connected_components(graph)]
     lines = [f"The feasible candidate graph is disconnected: {len(components)} components."]
@@ -127,6 +150,14 @@ def _describe_disconnection(
         for (a, b), candidate in sorted(bridges.items()):
             reasons = ", ".join(r.value for r in candidate.score.rejections) or "unknown"
             lines.append(f"    {candidate.key} (components {a + 1}/{b + 1}): {reasons}")
+
+    if intermediates_mode != "off":
+        lines.append(
+            f"  intermediates.mode={intermediates_mode!r} is set, so generation ran over this pool before "
+            "selection and closed none of the gaps above. The per-gap reasons are on the run's intermediate "
+            "record; raise max_gaps, try another generator, or loosen core_rmsd_threshold if the molecules "
+            "were invented but posed badly."
+        )
 
     if cbfe_mode in ("bridge", "cycles"):
         lines.append(
@@ -214,7 +245,13 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
         if len(names) > 1 and not nx.is_connected(graph):
             if options.require_connected:
                 raise NetworkPlanError(
-                    _describe_disconnection(graph, ligands, candidates, cbfe_mode=options.cbfe_mode),
+                    _describe_disconnection(
+                        graph,
+                        ligands,
+                        candidates,
+                        cbfe_mode=options.cbfe_mode,
+                        intermediates_mode=options.intermediates.mode,
+                    ),
                     rejected=[c for c in candidates if not c.feasible],
                 )
             unmet.append(f"network is disconnected ({nx.number_connected_components(graph)} components)")
@@ -227,7 +264,10 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
             for pair in sorted(cbfe_pool):
                 graph.add_edge(pair[0], pair[1], weight=cbfe_pool[pair], kind=EdgeKind.CBFE.value)
 
-        selected = self._add_redundancy(graph, selected, options, unmet)
+        # Synthetic vertices are excluded from the redundancy *targets* below, never from
+        # the pool. See _add_redundancy.
+        synthetic = frozenset(name for name, ligand in ligands.items() if ligand.synthetic)
+        selected = self._add_redundancy(graph, selected, options, unmet, synthetic=synthetic)
 
         def chosen(pair: tuple[str, str]) -> Transformation:
             """Materialize the transformation behind a selected pair."""
@@ -330,11 +370,27 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
         return selected
 
     def _add_redundancy(
-        self, graph: nx.Graph, selected: set[tuple[str, str]], options: NetworkOptions, unmet: list[str]
+        self,
+        graph: nx.Graph,
+        selected: set[tuple[str, str]],
+        options: NetworkOptions,
+        unmet: list[str],
+        *,
+        synthetic: frozenset[str] = frozenset(),
     ) -> set[tuple[str, str]]:
         """Greedily add cheap edges to raise degrees and close cycles.
 
         Strictly additive, so the spanning property established upstream survives.
+
+        *synthetic* names the vertices the planner itself invented. They are excluded from
+        the ``edges_per_ligand`` target and from the ``min_cycle_coverage`` denominator,
+        and from **nothing else**. The user asked for two edges per compound whose affinity
+        they care about; an intermediate is scaffolding, and padding its degree spends
+        simulation on a molecule nobody will report. They are emphatically *not* forbidden
+        from carrying cycles: ``A-M1-B-M2-A`` is a genuine consistency check on the real
+        pair, and it is exactly the subnetwork shape a PairMap-style generator emits. An
+        all-real network passes an empty set here and is bit-identical to one planned
+        before any of this existed.
 
         The two passes are handed *different* pools, and that is the whole of the
         ``cycles`` mode gate. Cycle closure may reach for a CBFE edge, because putting a
@@ -359,13 +415,13 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
 
         if options.selection_objective == "connectivity_then_cycles":
             if options.min_cycle_coverage > 0:
-                selected = self._close_cycles(graph, available, selected, options, unmet)
+                selected = self._close_cycles(graph, available, selected, options, unmet, synthetic=synthetic)
             if options.edges_per_ligand > 1:
-                selected = self._raise_degrees(graph, degree_available, selected, options, unmet)
+                selected = self._raise_degrees(graph, degree_available, selected, options, unmet, synthetic=synthetic)
         else:
-            selected = self._raise_degrees(graph, degree_available, selected, options, unmet)
+            selected = self._raise_degrees(graph, degree_available, selected, options, unmet, synthetic=synthetic)
             if options.min_cycle_coverage > 0:
-                selected = self._close_cycles(graph, available, selected, options, unmet)
+                selected = self._close_cycles(graph, available, selected, options, unmet, synthetic=synthetic)
 
         return selected
 
@@ -376,8 +432,15 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
         selected: set[tuple[str, str]],
         options: NetworkOptions,
         unmet: list[str],
+        *,
+        synthetic: frozenset[str] = frozenset(),
     ) -> set[tuple[str, str]]:
-        """Greedily add cheap edges until every ligand reaches the target degree."""
+        """Greedily add cheap edges until every real ligand reaches the target degree.
+
+        A synthetic vertex is never *deficient*, so it is never a reason to buy an edge and
+        never appears in the shortfall report -- but it remains a perfectly good partner
+        for a real ligand that is.
+        """
         selected = set(selected)
         degrees = {node: 0 for node in graph.nodes}
         for source, target in selected:
@@ -388,7 +451,7 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
         progress = True
         while progress and (options.n_edges is None or len(selected) < options.n_edges):
             progress = False
-            deficient = {n for n, d in degrees.items() if d < target_degree}
+            deficient = {n for n, d in degrees.items() if d < target_degree and n not in synthetic}
             if not deficient:
                 break
             ranked = sorted(
@@ -403,7 +466,7 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
             degrees[chosen[1]] += 1
             progress = True
 
-        remaining_deficient = sorted(n for n, d in degrees.items() if d < target_degree)
+        remaining_deficient = sorted(n for n, d in degrees.items() if d < target_degree and n not in synthetic)
         if remaining_deficient:
             message = (
                 f"edges_per_ligand={target_degree} unmet for {len(remaining_deficient)} ligand(s): "
@@ -420,11 +483,19 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
         selected: set[tuple[str, str]],
         options: NetworkOptions,
         unmet: list[str],
+        *,
+        synthetic: frozenset[str] = frozenset(),
     ) -> set[tuple[str, str]]:
         """Add cheap edges until enough ligands lie on a cycle.
 
         *available* is the cost-ordered pool of unselected pairs, computed once by the
         caller. It includes CBFE edges when ``cbfe_mode`` allows cycle closure to use them.
+
+        Coverage is measured over the *real* ligands only: they are what the user asked to
+        have checkable free energies for, and counting invented vertices in the denominator
+        would let a network satisfy the target by inventing molecules and then congratulate
+        itself for covering them. A synthetic vertex still carries cycles, and the coverage
+        it buys a real ligand counts in the numerator.
         """
         selected = set(selected)
 
@@ -440,10 +511,10 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
                     for u, v in edges:
                         nodes.add(u)
                         nodes.add(v)
-            return nodes
+            return nodes - synthetic
 
-        total = graph.number_of_nodes()
-        if total < 3:
+        total = graph.number_of_nodes() - len(synthetic)
+        if graph.number_of_nodes() < 3:
             return selected  # a cycle needs three vertices
 
         target = options.min_cycle_coverage * total

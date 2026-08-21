@@ -15,6 +15,11 @@ there is no mapping to convey -- so ``cbfe/`` contains only the edge list.
 
 A network that is entirely RBFE keeps the flat, historical layout, so existing callers see
 no change.
+
+When ``design_total_ns`` is set, each runconfig also carries a ``sample_allocation`` block:
+the A-optimal share of the total simulation budget for that edge, and a lambda-window count
+scaled to it. See :meth:`AmberExporter._sample_allocation` for why that computation lives
+here rather than in the planner.
 """
 
 from __future__ import annotations
@@ -106,9 +111,13 @@ class AmberExporter(AbstractExporter):
         rbfe_dir.mkdir(parents=True, exist_ok=True)
         written += self._write_edge_lists(rbfe_dir, rbfe_edges)
 
+        allocation = self._sample_allocation(network)
+
         payloads: dict[str, dict[str, Any]] = {}
         for edge in rbfe_edges:
             payload = self._edge_payload(network, edge, residue_names)  # type: ignore[arg-type]
+            if edge.unordered_key in allocation:
+                payload["sample_allocation"] = allocation[edge.unordered_key]
             payloads[edge.key] = payload
             path = rbfe_dir / f"atommap_{edge.key}{self.default_suffix}"
             path.write_text(yaml.safe_dump(payload, sort_keys=False, default_flow_style=False))
@@ -128,6 +137,78 @@ class AmberExporter(AbstractExporter):
             written += self._write_edge_lists(cbfe_dir, cbfe_edges)
 
         return tuple(written)
+
+    @staticmethod
+    def _sample_allocation(network: Network) -> dict[tuple[str, str], dict[str, float | int]]:
+        """Return the per-edge lambda-window and nanosecond budget, or ``{}`` if unrequested.
+
+        Parameters
+        ----------
+        network : Network
+
+        Returns
+        -------
+        dict[tuple[str, str], dict[str, float | int]]
+            Keyed by unordered endpoint pair. Each value carries ``simulation_ns``, the
+            A-optimal share of ``design_total_ns``; ``lambda_windows``, that share mapped
+            onto the requested window range; and ``predicted_sigma_kcal``, the cost the
+            allocation was derived from, so a reader can see what it was based on.
+
+        Notes
+        -----
+        The runconfig is the natural home for this. It is already written once per edge,
+        it is already the interoperability contract with amberstudio and guimapper, and a
+        second file keyed by edge would have to be kept in step with it by hand.
+
+        Computed here rather than in the planner deliberately: an allocation is a statement
+        about *how to run* the network, not about which edges it contains, and computing it
+        at export time means a network read back from JSON months later can still be
+        allocated -- against a different budget, without replanning.
+
+        Returns ``{}`` rather than a uniform split when ``design_total_ns`` is unset. A
+        uniform split is a real decision about how to spend machine time, and writing one
+        into every runconfig by default would silently override whatever the user's own
+        protocol said.
+
+        The allocation reads :attr:`EdgeScore.total
+        <rbfenetmap.core.models.EdgeScore.total>` as a standard deviation in kcal/mol,
+        which is true of the ``variance`` scorer and of no other. Under a different scorer
+        the numbers are still internally consistent -- an edge the scorer disliked gets
+        more time -- but they are not variances, and the twofold variance reduction the
+        method promises is not on offer.
+        """
+        options = network.options
+        if options is None or options.design_total_ns is None or not network.edges:
+            return {}
+
+        from rbfenetmap.core.design import allocate_effort
+
+        nodes = sorted(network.ligands)
+        pairs = [edge.unordered_key for edge in network.edges]
+        sigmas = [max(float(edge.score.total), 1e-9) for edge in network.edges]
+        try:
+            effort = allocate_effort(nodes, pairs, sigmas, total=options.design_total_ns)
+        except ValueError:
+            # A disconnected network has an unbounded criterion, so there is no optimal
+            # allocation to compute. Exporting is still perfectly valid -- the user asked
+            # for --allow-disconnected somewhere upstream -- so omit the block rather than
+            # failing an export over an optional annotation.
+            return {}
+
+        values = list(effort.values())
+        low, high = min(values), max(values)
+        span = high - low
+        windows_low, windows_high = options.design_lambda_min, options.design_lambda_max
+        allocation: dict[tuple[str, str], dict[str, float | int]] = {}
+        for pair, sigma in zip(pairs, sigmas):
+            share = effort[pair]
+            fraction = (share - low) / span if span > 0 else 0.0
+            allocation[pair] = {
+                "lambda_windows": int(round(windows_low + fraction * (windows_high - windows_low))),
+                "simulation_ns": round(float(share), 4),
+                "predicted_sigma_kcal": round(float(sigma), 4),
+            }
+        return allocation
 
     @staticmethod
     def _write_edge_lists(directory: Path, edges: Sequence[Transformation]) -> list[Path]:

@@ -136,6 +136,11 @@ class TestCLIConflicts:
             ("--scorer", "lomaplike"),
             ("--min-cycle-coverage", "0.5"),
             ("--pair-evaluation", "adaptive"),
+            ("--design", "a_optimal"),
+            ("--design-candidate-factor", "4.0"),
+            ("--design-total-ns", "100"),
+            ("--design-lambda-min", "8"),
+            ("--design-lambda-max", "32"),
         ],
     )
     def test_pinned_knob_is_refused(self, tmp_path, capsys, flag, value):
@@ -144,9 +149,10 @@ class TestCLIConflicts:
         assert flag in err
         assert "--compat v0.4" in err
 
-    def test_a_store_true_knob_is_refused(self, tmp_path, capsys):
-        assert self._plan(tmp_path, "--allow-disconnected") == 1
-        assert "--allow-disconnected" in capsys.readouterr().err
+    @pytest.mark.parametrize("flag", ["--allow-disconnected", "--design-refine"])
+    def test_a_store_true_knob_is_refused(self, tmp_path, capsys, flag):
+        assert self._plan(tmp_path, flag) == 1
+        assert flag in capsys.readouterr().err
 
     def test_several_conflicts_are_reported_together(self, tmp_path, capsys):
         assert self._plan(tmp_path, "--edges-per-ligand", "3", "--cbfe", "bridge") == 1

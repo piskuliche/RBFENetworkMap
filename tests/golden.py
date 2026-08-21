@@ -4,6 +4,16 @@ Every phase of the network-knobs work adds options that default to today's behav
 claim is only worth something if it is *checked*, and checked against something captured
 before any of it landed -- which is what ``tests/data/golden_benzamides.json`` is.
 
+The input is pinned too
+-----------------------
+``tests/data/golden_benzamides.sdf`` is tracked, rather than the series being read from
+``examples/data/benzamides.sdf``. That file is gitignored and regenerated on demand, so it
+is absent from a fresh clone and from CI. It is also the wrong kind of input for a baseline
+even when present: its coordinates come from a constrained embedding, so an RDKit upgrade
+could shift them, move ``core_rmsd``, and change every edge cost -- reporting a planner
+regression that is really an input change. A golden test's input has to be pinned as firmly
+as its expected output.
+
 What is compared, and what deliberately is not
 ----------------------------------------------
 Not the serialized network. A raw ``network_to_dict`` comparison would be byte-fragile in

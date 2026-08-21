@@ -29,13 +29,22 @@ from rbfenetmap.core.pipeline import build_network
 from rbfenetmap.io.loaders import load_ligands
 from rbfenetmap.io.networkio import dump_network, load_network, network_to_dict
 
-EXAMPLE_SDF = Path(__file__).resolve().parent.parent / "examples" / "data" / "benzamides.sdf"
+#: The structures the baseline was captured from, tracked in the repository.
+#:
+#: Deliberately *not* ``examples/data/benzamides.sdf``. That file is gitignored and
+#: regenerated on demand by ``examples/data/make_conformers.py``, so it does not exist in a
+#: fresh clone and these tests would not run at all in CI. It is also the wrong kind of
+#: input for a golden test even where it does exist: its coordinates come from a
+#: constrained embedding, so an RDKit upgrade could shift them, move ``core_rmsd``, and
+#: change every edge cost -- a baseline failure caused by the input rather than by the
+#: planner. A golden test's input has to be pinned exactly as firmly as its expected output.
+GOLDEN_SDF = Path(__file__).resolve().parent / "data" / "golden_benzamides.sdf"
 
 
 @pytest.fixture(scope="module")
 def example_ligands():
-    """The shipped example series -- the set the golden baseline was captured from."""
-    return load_ligands([str(EXAMPLE_SDF)])
+    """The nine-ligand series the golden baseline was captured from."""
+    return load_ligands([str(GOLDEN_SDF)])
 
 
 class TestPreset:
@@ -114,7 +123,7 @@ class TestCLIConflicts:
 
     def _plan(self, tmp_path, *extra):
         return main(
-            ["plan", "--ligands", str(EXAMPLE_SDF), "--out", str(tmp_path / "n.json"), "--compat", "v0.4", *extra]
+            ["plan", "--ligands", str(GOLDEN_SDF), "--out", str(tmp_path / "n.json"), "--compat", "v0.4", *extra]
         )
 
     @pytest.mark.parametrize(
@@ -162,13 +171,13 @@ class TestCLIPermitted:
     @pytest.mark.parametrize("extra", [[], ["--jobs", "2"], ["--no-progress"], ["--banned-edge", "bza_H~bza_F"]])
     def test_unpinned_flags_are_accepted(self, tmp_path, extra):
         out = tmp_path / "n.json"
-        assert main(["plan", "--ligands", str(EXAMPLE_SDF), "--out", str(out), "--compat", "v0.4", *extra]) == 0
+        assert main(["plan", "--ligands", str(GOLDEN_SDF), "--out", str(out), "--compat", "v0.4", *extra]) == 0
         assert load_network(out).options.compat == "v0.4"
 
     @pytest.mark.integration
     def test_compat_run_reproduces_the_baseline_end_to_end(self, tmp_path):
         out = tmp_path / "n.json"
-        assert main(["plan", "--ligands", str(EXAMPLE_SDF), "--out", str(out), "--compat", "v0.4"]) == 0
+        assert main(["plan", "--ligands", str(GOLDEN_SDF), "--out", str(out), "--compat", "v0.4"]) == 0
         assert network_fingerprint(load_network(out)) == load_golden("golden_benzamides")
 
 

@@ -379,7 +379,9 @@ class TestCLI:
         from rbfenetmap.cli.main import main
         from rbfenetmap.io.networkio import load_network
 
-        sdf = Path(__file__).resolve().parent.parent / "examples" / "data" / "benzamides.sdf"
+        # tests/data/, not examples/data/: the latter is gitignored and regenerated on
+        # demand, so it is absent from a fresh clone and from CI.
+        sdf = Path(__file__).resolve().parent / "data" / "golden_benzamides.sdf"
         out = tmp_path / "n.json"
         argv = ["plan", "--ligands", str(sdf), "--out", str(out), "--cluster-by", "scaffold", "--cluster-bridges", "2"]
         assert main(argv) == 0

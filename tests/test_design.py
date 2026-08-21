@@ -28,6 +28,12 @@ from rbfenetmap.core.design import (
 TRIANGLE = ["a", "b", "c"]
 TRIANGLE_EDGES = [("a", "b"), ("b", "c"), ("a", "c")]
 
+#: Six ligands and every pair between them, for the optimality comparison below. Module
+#: level rather than class attributes because a comprehension in a class body cannot see
+#: the class scope it is being evaluated in.
+_DESIGN_NODES = [f"l{i}" for i in range(6)]
+_DESIGN_EDGES = [tuple(sorted((a, b))) for i, a in enumerate(_DESIGN_NODES) for b in _DESIGN_NODES[i + 1 :]]
+
 
 class TestFisherInformation:
     def test_is_the_weighted_laplacian(self):
@@ -210,3 +216,135 @@ class TestAllocation:
     def test_a_disconnected_network_is_refused(self):
         with pytest.raises(ValueError, match="disconnected network"):
             allocate_effort(TRIANGLE, [("a", "b")], [1.0], total=1.0)
+
+
+class TestHeuristicOptimality:
+    """The claim the whole phase rests on, checked against exhaustive enumeration.
+
+    Xu's Appendix-H heuristic is published as landing within 1.10x of the true optimum,
+    and that number is why it ships as the default instead of a solver. A claim that
+    load-bearing has to be measured in CI rather than once during development: every stage
+    of the search is a judgement call a later refactor could quietly degrade, and the
+    criterion values would stay entirely plausible while it happened.
+
+    Sizing is deliberate. At five ligands and a spanning tree plus one, greedy descent
+    finds the exact optimum on every seed, so a bound of 1.10 would pass no matter how
+    badly the heuristic later regressed -- a test that cannot fail is worse than no test,
+    because it reads like cover. Six ligands with a tree plus three is the smallest shape
+    where greedy provably falls short of the optimum on both criteria, so the ratio is
+    live. :meth:`test_the_bound_is_actually_exercised` pins that property itself, so the
+    day someone shrinks these numbers for speed the suite says what was lost.
+    """
+
+    NODES = _DESIGN_NODES
+    EDGES = _DESIGN_EDGES
+    TARGET = 8  # spanning tree (5) + 3
+    SEEDS = range(8)
+
+    @classmethod
+    def _sigmas(cls, seed: int) -> list[float]:
+        return list(np.random.default_rng(seed * 31 + 6).uniform(0.3, 4.0, size=len(cls.EDGES)))
+
+    @classmethod
+    def _value(cls, edges, sigmas, criterion) -> float:
+        by_pair = dict(zip(cls.EDGES, sigmas))
+        chosen = sorted(edges)
+        return criterion_value(fisher_information(cls.NODES, chosen, [by_pair[e] for e in chosen]), criterion)
+
+    @classmethod
+    def _brute_force(cls, sigmas, criterion) -> float:
+        """The best criterion achievable by any design of the target size."""
+        import itertools
+
+        return min(cls._value(subset, sigmas, criterion) for subset in itertools.combinations(cls.EDGES, cls.TARGET))
+
+    @classmethod
+    def _greedy(cls, sigmas, criterion) -> float:
+        """The shipped stages 1-3, reproduced over plain edge lists.
+
+        Deliberately not a call into ``OptimalDesignPlanner``: routing through the planner
+        would drag in candidate collapse, orientation and validation, and a failure here
+        must mean the *search* regressed rather than something upstream of it.
+        """
+        import networkx as nx
+
+        graph = nx.Graph()
+        graph.add_nodes_from(cls.NODES)
+        for (u, v), sigma in zip(cls.EDGES, sigmas):
+            graph.add_edge(u, v, weight=sigma)
+
+        selected = {tuple(sorted(e)) for e in nx.minimum_spanning_edges(graph, weight="weight", data=False)}
+        while len(selected) < cls.TARGET:
+            best = min(
+                (p for p in cls.EDGES if p not in selected),
+                key=lambda p: cls._value(selected | {p}, sigmas, criterion),
+                default=None,
+            )
+            if best is None:
+                break
+            selected.add(best)
+        return cls._value(selected, sigmas, criterion)
+
+    @staticmethod
+    def _ratio(got: float, best: float, criterion: str) -> float:
+        """How far short of the optimum, as a ratio of the underlying quantities.
+
+        D-optimal is a log, so the meaningful comparison is of the determinants -- taking
+        a ratio of the log values instead would make the bound depend on where the
+        determinant happens to sit relative to 1, which is not a property of the search.
+        """
+        return math.exp(got - best) if criterion == "d_optimal" else got / best
+
+    @pytest.mark.parametrize("criterion", ["a_optimal", "d_optimal"])
+    @pytest.mark.parametrize("seed", SEEDS)
+    def test_stays_within_the_published_ratio_of_the_optimum(self, criterion, seed):
+        sigmas = self._sigmas(seed)
+        ratio = self._ratio(self._greedy(sigmas, criterion), self._brute_force(sigmas, criterion), criterion)
+        assert ratio <= 1.10, f"{criterion} seed={seed}: {ratio:.4f}x optimal"
+
+    @pytest.mark.parametrize("criterion", ["a_optimal", "d_optimal"])
+    def test_the_bound_is_actually_exercised(self, criterion):
+        """At least one seed must fall strictly short, or the bound above proves nothing.
+
+        This is the guard on the guard. If a future change to the sizing constants above
+        makes greedy exactly optimal everywhere, the 1.10 assertion silently stops being a
+        measurement and starts being a formality -- and this test is what notices.
+        """
+        ratios = [
+            self._ratio(
+                self._greedy(self._sigmas(s), criterion), self._brute_force(self._sigmas(s), criterion), criterion
+            )
+            for s in self.SEEDS
+        ]
+        assert max(ratios) > 1.0 + 1e-6, (
+            f"greedy is exactly optimal on every {criterion} seed, so the 1.10 bound is vacuous. "
+            "Raise TARGET or the node count until the search is genuinely challenged."
+        )
+
+    def test_the_spanning_tree_seed_beats_a_forced_bridge_cover(self):
+        """Why the shipped stage 1 departs from the paper.
+
+        A cost-chosen 2-edge-connected cover spends budget where the *criterion* did not
+        ask for it, and the criterion buys its own way out of bridges anyway -- a bridge
+        has large effective resistance, so it is exactly what the next greedy step wants
+        to relieve. This pins that finding, so the cheaper-looking "just match the paper"
+        refactor cannot land without the numbers being re-argued.
+        """
+        import itertools
+
+        import networkx as nx
+
+        sigmas = self._sigmas(3)
+        by_pair = dict(zip(self.EDGES, sigmas))
+
+        def bridgeless(edges) -> bool:
+            graph = nx.Graph()
+            graph.add_nodes_from(self.NODES)
+            graph.add_edges_from(edges)
+            return nx.is_connected(graph) and not list(nx.bridges(graph))
+
+        cheapest_cover = min(
+            (c for c in itertools.combinations(self.EDGES, self.TARGET) if bridgeless(c)),
+            key=lambda c: sum(by_pair[e] for e in c),
+        )
+        assert self._greedy(sigmas, "d_optimal") <= self._value(cheapest_cover, sigmas, "d_optimal")

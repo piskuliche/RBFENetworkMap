@@ -140,6 +140,23 @@ class IntermediateOptions:
     pose_rmsd_factor : float, optional
         Fraction of ``SoftcorePolicy.core_rmsd_threshold`` an accepted pose must stay
         under. See :data:`~rbfenetmap.core.posing.POSE_RMSD_FACTOR`.
+    min_link_score : float, optional
+        Lowest link score a generator may consider worth proposing, on a ``(0, 1]``
+        similarity scale where 1 is "no atoms change at all".
+    max_dist : int, optional
+        Longest source-to-target path, in links, the generator may propose. At least 2:
+        a one-link path *is* the direct transformation that was already rejected.
+    max_cycle : int, optional
+        Largest cycle the generator may build to give a proposed link a second,
+        independent route. Cycles are what turn a chain of intermediates into a network
+        with a closure error to check.
+    max_subgraph_dist : int, optional
+        How far from either parent, in links, a molecule may sit and still be considered
+        for the subnetwork. Bounds the search, and must be at least *max_dist*.
+    beta : float, optional
+        Decay rate of the exponential link score, in inverse heavy atoms. The published
+        default of 0.1 is the same constant LOMAP's similarity uses, and it is what makes
+        :attr:`min_link_score` ``0.2`` mean "at most about sixteen heavy atoms change".
 
     Raises
     ------
@@ -154,6 +171,17 @@ class IntermediateOptions:
     block that no stage consumes is a knob that lies. The pipeline now consumes every one
     of these, so the nesting is what makes a planned network state the settings that
     invented its vertices.
+
+    The last five fields keep the names and the published defaults of the PairMap
+    constants (``MIN_SCORE``, ``MAX_DIST``, ``MAX_CYCLE``, ``MAX_SUBGRAPH_DIST``,
+    ``beta``) from Furui *et al.*, *J. Chem. Inf. Model.* **2025**, 65, 705-721
+    (`doi:10.1021/acs.jcim.4c01634 <https://doi.org/10.1021/acs.jcim.4c01634>`_), so a
+    reader can grep them against the paper. They live on the shared options object rather
+    than on the generator because a plugin's parameters have to survive serialization to
+    make an invented ligand reproducible, and
+    :meth:`~rbfenetmap.core.meta.intermediates.AbstractIntermediateGenerator.describe_parameters`
+    is a report, not a record. A generator that does not search a subnetwork simply
+    ignores them.
     """
 
     mode: IntermediateMode = "off"
@@ -164,6 +192,11 @@ class IntermediateOptions:
     seed: int = 0xF00D
     max_pose_attempts: int = 10
     pose_rmsd_factor: float = POSE_RMSD_FACTOR
+    min_link_score: float = 0.2
+    max_dist: int = 3
+    max_cycle: int = 4
+    max_subgraph_dist: int = 4
+    beta: float = 0.1
 
     def __post_init__(self) -> None:
         """Reject nonsensical budgets up front."""
@@ -181,6 +214,22 @@ class IntermediateOptions:
             raise ValueError("max_pose_attempts must be at least 1.")
         if not 0.0 < self.pose_rmsd_factor <= 1.0:
             raise ValueError("pose_rmsd_factor must lie in (0, 1].")
+        if not 0.0 < self.min_link_score <= 1.0:
+            raise ValueError("min_link_score must lie in (0, 1]; it is a similarity, not a cost.")
+        if self.max_dist < 2:
+            raise ValueError(
+                "max_dist must be at least 2. A path of one link from source to target *is* the direct "
+                "transformation that was already rejected, so a shorter bound admits no intermediate at all."
+            )
+        if self.max_cycle < 3:
+            raise ValueError("max_cycle must be at least 3; a shorter cycle is a repeated edge.")
+        if self.max_subgraph_dist < self.max_dist:
+            raise ValueError(
+                f"max_subgraph_dist ({self.max_subgraph_dist}) must be at least max_dist ({self.max_dist}); "
+                "the subnetwork has to be able to hold the optimal path it is built around."
+            )
+        if self.beta <= 0.0:
+            raise ValueError("beta must be positive; it is the decay rate of an exponential link score.")
 
     @property
     def enabled(self) -> bool:

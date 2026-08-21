@@ -109,6 +109,11 @@ COMPAT_CLI_PINS: dict[str, dict[str, Any]] = {
         "intermediate_seed": 0xF00D,
         "intermediate_pose_attempts": 10,
         "intermediate_pose_rmsd_factor": 0.5,
+        "intermediate_min_link_score": 0.2,
+        "intermediate_max_dist": 3,
+        "intermediate_max_cycle": 4,
+        "intermediate_max_subgraph_dist": 4,
+        "intermediate_beta": 0.1,
         "consistency": "pairwise",
     }
 }
@@ -573,6 +578,56 @@ def add_network_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     group.add_argument(
+        "--intermediate-min-link-score",
+        type=float,
+        default=0.2,
+        metavar="S",
+        help=(
+            "Lowest link score a generator may consider worth proposing, on a (0, 1] similarity scale "
+            "(default: %(default)s). PairMap's MIN_SCORE."
+        ),
+    )
+    group.add_argument(
+        "--intermediate-max-dist",
+        type=int,
+        default=3,
+        metavar="N",
+        help=(
+            "Longest source-to-target path, in links, a generator may propose (default: %(default)s). "
+            "At least 2: a one-link path is the direct edge that was already rejected. PairMap's MAX_DIST."
+        ),
+    )
+    group.add_argument(
+        "--intermediate-max-cycle",
+        type=int,
+        default=4,
+        metavar="N",
+        help=(
+            "Largest cycle a generator may build to give a proposed link a second, independent route "
+            "(default: %(default)s). PairMap's MAX_CYCLE."
+        ),
+    )
+    group.add_argument(
+        "--intermediate-max-subgraph-dist",
+        type=int,
+        default=4,
+        metavar="N",
+        help=(
+            "How far from either parent, in links, a molecule may sit and still join the proposed "
+            "subnetwork (default: %(default)s). PairMap's MAX_SUBGRAPH_DIST."
+        ),
+    )
+    group.add_argument(
+        "--intermediate-beta",
+        type=float,
+        default=0.1,
+        metavar="B",
+        help=(
+            "Decay rate of the exponential link score, per heavy atom changed (default: %(default)s). "
+            "The same constant LOMAP's similarity uses."
+        ),
+    )
+    group.add_argument(
         "--progress",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -639,6 +694,11 @@ def build_network_options(args: argparse.Namespace) -> NetworkOptions:
         seed=args.intermediate_seed,
         max_pose_attempts=args.intermediate_pose_attempts,
         pose_rmsd_factor=args.intermediate_pose_rmsd_factor,
+        min_link_score=args.intermediate_min_link_score,
+        max_dist=args.intermediate_max_dist,
+        max_cycle=args.intermediate_max_cycle,
+        max_subgraph_dist=args.intermediate_max_subgraph_dist,
+        beta=args.intermediate_beta,
     )
     return NetworkOptions(
         pair_strategy=args.pair_strategy,

@@ -271,6 +271,11 @@ def network_to_dict(network: Network) -> dict[str, Any]:
                     "seed": options.intermediates.seed,
                     "max_pose_attempts": options.intermediates.max_pose_attempts,
                     "pose_rmsd_factor": options.intermediates.pose_rmsd_factor,
+                    "min_link_score": options.intermediates.min_link_score,
+                    "max_dist": options.intermediates.max_dist,
+                    "max_cycle": options.intermediates.max_cycle,
+                    "max_subgraph_dist": options.intermediates.max_subgraph_dist,
+                    "beta": options.intermediates.beta,
                 },
                 # Omitted entirely when unset, so a network planned without --compat
                 # serializes byte-for-byte as it did before the flag existed. An

@@ -52,6 +52,24 @@ counterpoised edge is set by ``--cbfe-base-cost`` and ``--cbfe-atom-weight``. Se
 :doc:`concepts/network_selection` for what each mode may and may not spend an edge on.
 ``--cbfe all`` skips mapping altogether, so ``--mapper`` is ignored there.
 
+To try inventing a bridging ligand *before* falling back to counterpoised edges, add
+``--intermediates``:
+
+.. code-block:: bash
+
+   rbfenet plan --ligands ligands.sdf \
+                --intermediates bridge --cbfe bridge \
+                --out network.json
+
+The two compose without any precedence rule: generation runs before selection, so a gap
+an invented ligand closed is no longer a gap when CBFE eligibility is evaluated, and one
+it could not close is still rescued by ``--cbfe bridge``. ``--intermediates gaps``
+additionally offers infeasible pairs *inside* a connected component.
+``--max-intermediates``, ``--max-intermediate-gaps`` and ``--intermediates-per-gap`` bound
+the work; ``--intermediate-generator`` chooses the plugin. Every attempt is recorded in
+the network JSON, and every invented ligand carries the parents, generator and pose RMSD
+it was built from. See :doc:`concepts/network_selection`.
+
 ``--pair-evaluation adaptive`` fingerprint-ranks the all-pairs pool and maps it in
 batches. It first evaluates each ligand's nearest neighbours, then prioritizes pairs
 that bridge currently disconnected feasible components. Once connected, it evaluates

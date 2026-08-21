@@ -105,6 +105,7 @@ The feasible candidate graph is disconnected: 2 components.
 | `--max-cycle-size` | During cycle coverage, ignore candidate additions that would only make larger cycles than this. |
 | `--pair-evaluation adaptive` | Fingerprint-rank all pairs and run expensive mappings in batches until connectivity and redundancy targets are met. |
 | `--cbfe {off,bridge,cycles,all}` | Use counterpoised edges, which need no atom mapping and so are available between *any* two ligands. See below. |
+| `--intermediates {off,bridge,gaps}` | Invent a bridging ligand for pairs no mapping can relate, turning one impossible edge into two possible ones. The invented molecule is posed against its parents and its sub-edges face the same feasibility checks as any other edge; a proposal whose sub-edges do not survive is dropped whole, molecules included. Budgeted out of `--n-edges`, never on top of it. |
 | `--progress` / `--no-progress` | Show or suppress pair-mapping progress. Interactive CLI runs show it automatically. |
 | `--forced-edge` / `--banned-edge` | Absolute. A forced edge bypasses scoring but not feasibility. |
 | `--max-softcore-atoms` | A *feasibility* knob: it changes the candidate pool, not the selection. |

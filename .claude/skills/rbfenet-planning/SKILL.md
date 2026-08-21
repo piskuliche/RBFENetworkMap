@@ -70,7 +70,15 @@ edge sets, degree sequences, and diameter before and after on
 `tests/test_cbfe.py` use `make_transformation` from `conftest.py`, which carries no chemistry
 at all: the planner only reads endpoints, feasibility, cost, and kind.
 
-## Known gap
+## Selection is not the only thing that edits a network
 
-`--consistency graph` is declared in `NetworkOptions` and the CLI and implemented nowhere.
-It promises graph-wide core consistency and delivers a no-op.
+Two post-selection passes run *after* the planner and must not be confused with it.
+
+- `core/consistency.py` — `--consistency graph` intersects each ligand's core across its
+  selected RBFE edges and re-repairs to a fixed point. It rewrites mappings and costs; it
+  never changes which edges were chosen.
+- `core/surgery.py` and `core/diagnostics.py` — appending, deleting, merging, and
+  LMI-driven replanning. Replanning is expressed as bans plus forced edges and then runs
+  *this* planner, deliberately: a second selection strategy alongside the real one would
+  drift from it. If you are tempted to add edge-patching logic there, express it as a
+  constraint and let the planner resolve it.

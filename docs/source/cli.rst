@@ -7,6 +7,7 @@ Command line
    rbfenet score     Score candidate edges without selecting a network.
    rbfenet map       Compute mappings for specific pairs.
    rbfenet export    Export an already-planned network.
+   rbfenet replan    Prune high-LMI edges from a planned network and replan the gaps.
    rbfenet report    Render a self-contained HTML report.
    rbfenet plugins   List plugins and their availability.
    rbfenet inspect   Show everything known about one edge.
@@ -107,6 +108,25 @@ contribution, which is how you find out *why* an edge scores as it does.
 .. code-block:: bash
 
    rbfenet score --ligands ligands.sdf --explain --top 20 --show-rejected
+
+replan
+------
+
+The return leg of the plan-run-diagnose-replan loop. Give it a planned network and the
+per-edge Lagrange Multiplier Indices from the analysis; it bans the worst edges and
+re-selects the gaps from the candidate pool the original run already scored, mapping
+nothing new.
+
+.. code-block:: bash
+
+   rbfenet replan --network network.json --lmi lmi.json \
+                  --lmi-quantile 0.9 --max-pruned 3 \
+                  --out replanned.json
+
+Surviving edges are held in place unless ``--reselect`` is given, so the replan changes only
+the gaps -- edges that are already set up or running do not move. ``--lmi-threshold`` cuts at
+an absolute value instead of a quantile. See :ref:`lmi-replanning` for the LMI file format,
+and for what pruning on hysteresis does and does not buy.
 
 inspect
 -------

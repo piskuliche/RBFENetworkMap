@@ -40,6 +40,15 @@ Pipeline
 
 .. automodule:: rbfenetmap.core.cbfe
 
+.. automodule:: rbfenetmap.core.consistency
+
+Surgery and diagnostics
+-----------------------
+
+.. automodule:: rbfenetmap.core.surgery
+
+.. automodule:: rbfenetmap.core.diagnostics
+
 Plugin registry
 ---------------
 

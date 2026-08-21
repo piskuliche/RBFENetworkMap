@@ -108,6 +108,7 @@ The feasible candidate graph is disconnected: 2 components.
 | `--progress` / `--no-progress` | Show or suppress pair-mapping progress. Interactive CLI runs show it automatically. |
 | `--forced-edge` / `--banned-edge` | Absolute. A forced edge bypasses scoring but not feasibility. |
 | `--max-softcore-atoms` | A *feasibility* knob: it changes the candidate pool, not the selection. |
+| `--consistency graph` | Give every ligand **one** core across all of its edges — the intersection of its pairwise cores — instead of a different core per partner. Applied after selection and re-repaired to a fixed point. |
 | `--charge-change-policy` | `allow` / `penalize` / `reject`. |
 | `--ring-policy none` | Permit half-broken rings, for deliberate ring-opening work. |
 
@@ -172,6 +173,44 @@ then expands only while degree or cycle targets remain unmet. Tune its granulari
 when a complete scored pair matrix is required. Interactive runs show completed mappings,
 elapsed time, throughput, and estimated remaining time; pass `--progress` to retain this
 display when stderr is redirected to a log.
+
+## Surgery and replanning
+
+Nobody plans once. Ligands arrive in batches, edges fail to converge, and a new series gets
+joined onto one that is already running — and re-planning from scratch discards the mappings
+already computed *and* reshuffles edges that are already set up or queued.
+
+`rbfenetmap.core.surgery` edits an existing network instead. `Network` is frozen, so each
+operation returns a new one and the untouched edges keep their identity, mappings, and costs.
+
+```python
+from rbfenetmap.core.surgery import append_ligand, concatenate_networks, delete_edge
+
+bigger = append_ligand(network, new_ligand, n_edges=2)   # maps only the new ligand's pairs
+smaller = delete_edge(network, "lig_a~lig_b")            # refuses a bridge, and says which
+joined = concatenate_networks(series_1, series_2, n_bridges=2)
+```
+
+`cyclize_around_component` — which Konnektor declares and leaves as `NotImplementedError` —
+adds edges until every ligand in a named set lies on a cycle, which is the state one or two
+ligands are left in after an append or a deletion.
+
+Closing the loop, `rbfenet replan` ingests the per-edge **Lagrange Multiplier Index** from an
+edgembar network analysis, bans the worst edges, and re-selects the gaps from the candidate
+pool the original run already scored — mapping nothing new:
+
+```bash
+rbfenet replan --network network.json --lmi lmi.json --lmi-quantile 0.9 --out replanned.json
+```
+
+> **LMI pruning substantially reduces cycle-closure error and leaves MUE and RMSE against
+> experiment essentially unchanged.** Hysteresis is a *sampling* diagnostic, not an accuracy
+> predictor: a systematic error moves every edge around a cycle the same way and cancels
+> exactly where hysteresis would have shown it. Use this to find internally inconsistent
+> edges, not to chase agreement with experiment.
+
+The LMI file is a small JSON schema of this package's own (`{"lig_a~lig_b": 0.31, ...}`);
+reading edgembar's on-disk output directly is a follow-up.
 
 ## Python API
 

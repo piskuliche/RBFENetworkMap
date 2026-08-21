@@ -69,6 +69,53 @@ When ``selection_objective="connectivity_then_cycles"``, candidate additions are
 by how many *new* ligands they place on a cycle, then by cycle length, then by cost.
 ``max_cycle_size`` can be used to ignore long loops and prefer triangles or 4-cycles.
 
+Core consistency
+----------------
+
+By default every edge is mapped on its own, and holds the largest common core its own pair
+supports -- the cheapest transformation for that pair. A ligand sitting on three edges
+therefore holds three different cores, one per partner, and nothing requires them to agree.
+Whether an atom is "in the core" is a question that can only be answered per edge.
+
+``--consistency graph`` answers it per *ligand*. After selection, each ligand keeps the
+**intersection** of its cores over all of its selected RBFE edges; everything else is
+demoted to soft-core and the repair is re-run on what remains. The network then shares one
+genuine common core rather than a merely pairwise-compatible one, which is what a group of
+ligands sharing a scaffold means -- and what a per-cluster Amber setup wants.
+
+It runs to a fixed point rather than in one pass. Demoting an atom on one side drops its
+partner on the other, which shrinks that ligand's core, which changes *its* intersection;
+and the repair may demote further atoms still to keep the soft-core in one connected piece.
+Cores only ever shrink, so the iteration is monotone on a finite set and terminates.
+
+On the nine-ligand example series, one edge changes: ``bza_Me~bza_Et`` maps pairwise onto an
+18-atom core -- those two ligands are more like each other than either is like the rest --
+while every other edge on either of them gets 15. Under ``graph`` it drops to 15 too, and
+the edge is re-costed upward to say so.
+
+Two things it deliberately does not do:
+
+- **It does not re-select.** A smaller core makes an edge dearer, and in principle a
+  different network would be optimal under the reduced cores -- but recomputing selection
+  here would mean re-mapping the pool under a constraint that depends on which edges were
+  selected, which is circular. This refines the mappings of the edges that were chosen, and
+  reports the new costs honestly.
+- **It does not absorb a failure.** The shared core is an intersection, so it is never
+  larger than a pairwise one, and it can fall below ``min_core_atoms`` or push the soft-core
+  past its budget. That raises, naming the edges and reasons. These are *selected* edges: a
+  network handed back containing one marked infeasible cannot be run, and quietly reverting
+  the offending edges to their pairwise cores would produce something that is not
+  graph-consistent while claiming to be -- the exact failure this option was reported for
+  when it was still a no-op.
+
+A raise here is also information: it means these ligands do not share a core large enough to
+run on, which is a fact about the series worth knowing.
+
+Counterpoised (CBFE) edges are ignored by the intersection. One has no common core by
+construction, so reading it as "this ligand's core is empty here" would erase the core of
+every ligand a bridge touches -- an artefact of the bridge, not a statement about the
+scaffold.
+
 Counterpoised (CBFE) edges
 --------------------------
 

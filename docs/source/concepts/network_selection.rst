@@ -246,6 +246,11 @@ too dissimilar, the geometry irreconcilable. ``intermediates.mode`` lets the pla
 *invent* a molecule that sits between them, turning one impossible edge into two possible
 ones. It is off by default.
 
+The molecules themselves -- which generator proposes them, how they are posed, what
+certifies the pose, and what an export has to carry -- are :doc:`intermediates`. This
+section is about the *stage*: which gaps reach a generator, and how the result interacts
+with every other knob.
+
 ``off``
    Never. No generator is even constructed, so a run that does not ask for intermediates
    never imports one.

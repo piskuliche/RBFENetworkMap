@@ -71,10 +71,26 @@ which spares the poser a `GetSubstructMatch` whose symmetry it would have to res
 guessing. Posing failures are data: `pose_intermediate` returns a `PoseResult` carrying a
 `PoseRejection`, never an exception.
 
+Two are built in. `pairmap` (default) searches a subnetwork of R-group recombinations;
+`fragment-swap` emits one hybrid per differing position and is the `IdentityMapper` of this
+kind. Both share `plugins/intermediates/_rgroups.py`, which owns the MCS core (symmetry
+resolved by in-place RMSD, never by whichever embedding came back first) and the
+combine-and-delete molecule construction that yields an exact `parent_atom_map`. Reuse it
+rather than re-deriving a decomposition: two copies that drifted would mean two generators
+disagreeing about what a molecule *is* while both looked correct alone.
+
+A generator's *numeric* knobs belong on `IntermediateOptions`, not on the generator, because
+they have to be serialized with the network for an invented ligand to be reproducible.
+`describe_parameters()` is a report, not a record — put what the algorithm *does* there, not
+a second copy of the constants that drove it.
+
 ## Exporters specifically
 
 An exporter adapts a network to a downstream consumer without that consumer's concerns
 reaching back into the core — keep format-specific logic entirely inside the exporter.
 `export()` returns the paths it wrote. The Amber exporter splits `rbfe/` and `cbfe/`
 subdirectories because amberstudio's `BuildEdges` takes `alchemical_mode` per invocation
-rather than per edge.
+rather than per edge, and writes `ligands/<name>.sdf` for **every** ligand plus an
+`intermediates.txt` manifest — keep the invariant that every name in `edges.dat` has a file
+in `ligands/`, because a residue with no topology fails deep inside somebody else's tooling
+hours later.

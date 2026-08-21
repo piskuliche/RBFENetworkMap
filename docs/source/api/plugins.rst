@@ -51,3 +51,5 @@ Intermediate generators
 .. automodule:: rbfenetmap.plugins.intermediates
 
 .. automodule:: rbfenetmap.plugins.intermediates.fragment_swap
+
+.. automodule:: rbfenetmap.plugins.intermediates.pairmap_generator

@@ -16,6 +16,7 @@ most one connected soft-core region per side.**
    concepts/softcore_repair
    concepts/scoring
    concepts/network_selection
+   concepts/intermediates
    cli
    plugins
 

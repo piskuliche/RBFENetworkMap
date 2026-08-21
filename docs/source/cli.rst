@@ -66,9 +66,18 @@ an invented ligand closed is no longer a gap when CBFE eligibility is evaluated,
 it could not close is still rescued by ``--cbfe bridge``. ``--intermediates gaps``
 additionally offers infeasible pairs *inside* a connected component.
 ``--max-intermediates``, ``--max-intermediate-gaps`` and ``--intermediates-per-gap`` bound
-the work; ``--intermediate-generator`` chooses the plugin. Every attempt is recorded in
-the network JSON, and every invented ligand carries the parents, generator and pose RMSD
-it was built from. See :doc:`concepts/network_selection`.
+the work; ``--intermediate-generator`` chooses the plugin, defaulting to ``pairmap``. The
+subnetwork search is tuned with ``--intermediate-min-link-score``,
+``--intermediate-max-dist``, ``--intermediate-max-cycle``,
+``--intermediate-max-subgraph-dist`` and ``--intermediate-beta``, whose names and defaults
+are the paper's. Every attempt is recorded in the network JSON, and every invented ligand
+carries the parents, generator and pose RMSD it was built from.
+
+An invented ligand is a residue nobody has parameterised, so ``--export amber`` writes
+``ligands/<name>.sdf`` for every ligand and an ``intermediates.txt`` manifest, and
+``--validate-exporter amber`` warns about the count before the mapping run rather than
+after. See :doc:`concepts/intermediates` for the generator and
+:doc:`concepts/network_selection` for the stage.
 
 ``--pair-evaluation adaptive`` fingerprint-ranks the all-pairs pool and maps it in
 batches. It first evaluates each ligand's nearest neighbours, then prioritizes pairs

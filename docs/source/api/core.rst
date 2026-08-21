@@ -40,6 +40,11 @@ Pipeline
 
 .. automodule:: rbfenetmap.core.cbfe
 
+Optimal design
+--------------
+
+.. automodule:: rbfenetmap.core.design
+
 Plugin registry
 ---------------
 

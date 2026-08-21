@@ -17,11 +17,19 @@ from typing import Sequence
 
 from rbfenetmap.cli._args import build_alignment_options, build_mapping_options, build_network_options, parse_key_values
 from rbfenetmap.core.exceptions import NetworkPlanError, RBFENetworkMapError
-from rbfenetmap.core.models import EdgeKind, Ligand, Network, RejectionReason, Transformation, parse_edge_key
+from rbfenetmap.core.models import (
+    EDGE_SEPARATOR,
+    EdgeKind,
+    Ligand,
+    Network,
+    RejectionReason,
+    Transformation,
+    parse_edge_key,
+)
 from rbfenetmap.core.pipeline import build_candidate, build_network, evaluate_pairs
 from rbfenetmap.io.loaders import load_ligands
 
-__all__ = ("cmd_export", "cmd_inspect", "cmd_map", "cmd_plan", "cmd_plugins", "cmd_report", "cmd_score")
+__all__ = ("cmd_export", "cmd_inspect", "cmd_map", "cmd_plan", "cmd_plugins", "cmd_replan", "cmd_report", "cmd_score")
 
 logger = logging.getLogger(__name__)
 
@@ -412,6 +420,53 @@ def cmd_export(args: argparse.Namespace) -> int:
     written = _run_exports(network, args.exporter, Path(args.dest), parse_key_values(args.exporter_opt))
     for path in written:
         print(path)
+    return 0
+
+
+def cmd_replan(args: argparse.Namespace) -> int:
+    """Prune high-LMI edges from a planned network and replan the gaps.
+
+    The pruned edges are printed rather than only recorded, because the network JSON's
+    options block does not persist ``banned_edges``: without the printout the fact that
+    anything was pruned would survive only in this terminal.
+    """
+    from rbfenetmap.core.diagnostics import load_edge_lmi, replan_after_diagnostics
+    from rbfenetmap.io.networkio import dump_network, load_network
+
+    network = load_network(Path(args.network))
+    lmi = load_edge_lmi(Path(args.lmi))
+    replanned, pruned = replan_after_diagnostics(
+        network,
+        lmi,
+        threshold=args.lmi_threshold,
+        quantile=args.lmi_quantile,
+        max_pruned=args.max_pruned,
+        require_complete=not args.allow_missing_lmi,
+        keep_existing=not args.reselect,
+        planner=args.planner,
+    )
+
+    if not pruned:
+        print("No edge exceeds the LMI cut; the network is unchanged.")
+    else:
+        print(f"Pruned {len(pruned)} edge(s) on their Lagrange Multiplier Index:")
+        rows = [[f"{a}{EDGE_SEPARATOR}{b}", f"{lmi[(a, b)]:.4g}"] for a, b in pruned]
+        print(_format_table(rows, ["edge", "lmi"]))
+
+    before = {edge.unordered_key for edge in network.edges}
+    after = {edge.unordered_key for edge in replanned.edges}
+    added = sorted(after - before)
+    if added:
+        print(f"\nReplanned with {len(added)} replacement edge(s):")
+        print(_format_table([[f"{a}{EDGE_SEPARATOR}{b}"] for a, b in added], ["edge"]))
+
+    out = Path(args.out)
+    dump_network(replanned, out)
+    print(f"\n{len(replanned.edges)} edge(s) over {len(replanned.ligands)} ligand(s) -> {out}")
+    if replanned.unmet_constraints:
+        print("\nUnmet constraints:", file=sys.stderr)
+        for constraint in replanned.unmet_constraints:
+            print(f"  - {constraint}", file=sys.stderr)
     return 0
 
 

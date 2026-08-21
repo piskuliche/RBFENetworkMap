@@ -873,16 +873,23 @@ class Network:
     def to_networkx(self) -> "nx.Graph":
         """Return the selected edges as an undirected :class:`networkx.Graph`.
 
-        Nodes are ligand names; each edge carries ``transformation``, ``weight`` (the
+        Nodes carry ``synthetic``; each edge carries ``transformation``, ``weight`` (the
         score total), and ``kind`` (the :class:`EdgeKind` value as a plain string)
         attributes. ``kind`` is duplicated out of the transformation so consumers that
         only style or filter edges -- the SVG renderer, the GraphML exporter -- never have
         to reach back through the object.
+
+        ``synthetic`` is a plain ``bool`` rather than the whole
+        :class:`LigandProvenance` for the same reason and one more: GraphML types every
+        attribute, so a nested mapping would not survive the trip at all, and a graph
+        exported without it would show an invented vertex as an ordinary ligand -- which
+        is precisely the mistake this feature can make that costs somebody a simulation.
         """
         import networkx as nx
 
         graph: nx.Graph = nx.Graph()
-        graph.add_nodes_from(self.ligands)
+        for name, ligand in self.ligands.items():
+            graph.add_node(name, synthetic=ligand.synthetic)
         for edge in self.edges:
             graph.add_edge(edge.source, edge.target, transformation=edge, weight=edge.score.total, kind=edge.kind.value)
         return graph

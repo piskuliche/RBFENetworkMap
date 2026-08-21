@@ -58,6 +58,9 @@ th { font-weight: 600; }
 .badge { display: inline-block; font-size: .7rem; font-weight: 600; letter-spacing: .05em;
          border-radius: 4px; padding: .05rem .35rem; vertical-align: 2px; margin-left: .4rem;
          border: 1px solid #7c3aed; color: #7c3aed; }
+.badge.syn { border-style: dashed; border-color: #0f766e; color: #0f766e; }
+.node-marker { display: inline-block; width: .8rem; height: .8rem; border-radius: 50%;
+               border: 2px dashed #22384f; vertical-align: -1px; margin-right: .3rem; }
 .warn { border-left: 3px solid #e08a3c; padding-left: .8rem; }
 """
 
@@ -79,6 +82,30 @@ def _badge(edge: "Transformation") -> str:
     report where all but a handful of edges are relative.
     """
     return "<span class='badge'>CBFE</span>" if edge.kind is EdgeKind.CBFE else ""
+
+
+def _is_synthetic(network: "Network", name: str) -> bool:
+    """Whether *name* is a ligand this package invented.
+
+    Tolerant of a name the network does not carry and of ``provenance=None``, because a
+    report is the last thing that should refuse to render.
+    """
+    ligand = network.ligands.get(name)
+    return ligand is not None and ligand.synthetic
+
+
+def _synthetic_badge(edge: "Transformation", network: "Network") -> str:
+    """Return a ``SYN`` marker when either endpoint of *edge* was invented.
+
+    A dashed border on the badge, matching the dashed node outline in the network diagram,
+    and the three letters carry the meaning on their own. That follows the rule the CBFE
+    marker already sets: the exceptional thing is *labelled*, never merely coloured, so it
+    survives a greyscale print and a reader who does not distinguish the hues.
+    """
+    invented = [name for name in (edge.source, edge.target) if _is_synthetic(network, name)]
+    if not invented:
+        return ""
+    return f"<span class='badge syn' title='invented: {_escape(', '.join(invented))}'>SYN</span>"
 
 
 def _edge_summary(edge: "Transformation") -> str:
@@ -113,6 +140,7 @@ def render_report(network: "Network", *, title: str = "RBFE network", show_indic
     rejected = network.rejected
     repaired = [e for e in network.edges if e.repair.applied]
     cbfe_edges = network.cbfe_edges
+    synthetic = network.synthetic_ligands
     selected_edges = sorted(network.edges, key=lambda e: e.score.total)
     edge_links = {edge.unordered_key: f"#{_edge_anchor(edge.key)}" for edge in selected_edges}
 
@@ -127,6 +155,13 @@ def render_report(network: "Network", *, title: str = "RBFE network", show_indic
             "opposite directions rather than morphing one ligand into the other, so both molecules are "
             "entirely soft-core and there is no common core to show."
         )
+    if synthetic:
+        intro += (
+            " Vertices marked <span class='badge syn'>SYN</span>, and drawn with a dashed outline in the "
+            "network diagram, are molecules this package <em>invented</em> to bridge a pair no mapping could "
+            "relate. Nobody supplied them and nobody has measured them: each one needs parameterising before "
+            "any edge touching it can run, and their provenance is listed below."
+        )
     intro += "</p>"
 
     parts = [
@@ -136,9 +171,17 @@ def render_report(network: "Network", *, title: str = "RBFE network", show_indic
         f"<h1>{_escape(title)}</h1>",
         intro,
         "<div class='summary'>",
-        f"<div class='stat'><div class='value'>{len(network.ligands)}</div><div class='label'>Ligands</div></div>",
+        # Real ligands, not all of them. "12 ligands" quietly meaning nine real ones and
+        # three inventions is the single most expensive misreading this report can invite,
+        # so the invented ones get their own stat rather than being folded into the total.
+        f"<div class='stat'><div class='value'>{len(network.ligands) - len(synthetic)}</div>"
+        "<div class='label'>Ligands</div></div>",
         f"<div class='stat'><div class='value'>{len(network.edges)}</div><div class='label'>Edges</div></div>",
     ]
+    if synthetic:
+        parts.append(
+            f"<div class='stat'><div class='value'>{len(synthetic)}</div><div class='label'>Invented</div></div>"
+        )
     if cbfe_edges:
         parts.append(
             f"<div class='stat'><div class='value'>{len(cbfe_edges)}</div><div class='label'>CBFE edges</div></div>"
@@ -173,13 +216,16 @@ def render_report(network: "Network", *, title: str = "RBFE network", show_indic
             "<span><span class='rule'></span>RBFE edge</span>",
             "<span><span class='rule cbfe'></span>CBFE edge (counterpoised)</span>",
         ]
+    if synthetic:
+        parts.append("<span><span class='node-marker'></span>invented ligand (<strong>SYN</strong>)</span>")
     parts.append("</div>")
 
     if selected_edges:
         parts.append("<div class='edge-index'>")
         for edge in selected_edges:
             parts.append(
-                f"<a href='#{_edge_anchor(edge.key)}'><strong>{_escape(edge.key)}{_badge(edge)}</strong>"
+                f"<a href='#{_edge_anchor(edge.key)}'>"
+                f"<strong>{_escape(edge.key)}{_badge(edge)}{_synthetic_badge(edge, network)}</strong>"
                 f"<span class='meta'>cost {edge.score.total:.3f} &middot; {_edge_summary(edge)}</span></a>"
             )
         parts.append("</div>")
@@ -188,7 +234,7 @@ def render_report(network: "Network", *, title: str = "RBFE network", show_indic
         source_svg, target_svg = render_edge_svg(edge, network.ligands, show_indices=show_indices)
         parts += [
             f"<div class='edge' id='{_edge_anchor(edge.key)}'>",
-            f"<h3>{_escape(edge.key)}{_badge(edge)}</h3>",
+            f"<h3>{_escape(edge.key)}{_badge(edge)}{_synthetic_badge(edge, network)}</h3>",
             f"<div class='meta'>cost {edge.score.total:.3f} &middot; {_edge_summary(edge)} &middot; "
             f"{'protocol' if edge.kind is EdgeKind.CBFE else 'mapper'} {_escape(edge.mapping.method)}</div>",
             f"<div class='panes scroll'>{source_svg}{target_svg}</div>",
@@ -201,6 +247,30 @@ def render_report(network: "Network", *, title: str = "RBFE network", show_indic
                 f"<div class='trace'>{_escape(trace)}</div>"
             )
         parts.append("</div>")
+
+    if synthetic:
+        parts += [
+            "<h2>Invented ligands</h2>",
+            "<p class='meta'>Molecules this package proposed and posed against their parents. "
+            "<strong>Pose RMSD</strong> is the in-place deviation of the posed atoms from the parent "
+            "coordinates they were taken from, measured with the same function the feasibility gate uses -- "
+            "so it is directly comparable to the core-RMSD threshold, and a value close to it is a pose that "
+            "only just qualified. <strong>Pose method</strong> says whether the generator handed over a "
+            "complete atom correspondence or one had to be recovered by an MCS search; the latter is the "
+            "weaker provenance and is named rather than hidden.</p>",
+            "<div class='scroll'><table><thead><tr><th>Ligand</th><th>Parents</th><th>Generator</th>"
+            "<th>Pose method</th><th>Pose RMSD (&#8491;)</th></tr></thead><tbody>",
+        ]
+        for ligand in synthetic:
+            provenance = ligand.provenance
+            parts.append(
+                f"<tr><td>{_escape(ligand.name)}<span class='badge syn'>SYN</span></td>"
+                f"<td>{_escape(' + '.join(provenance.parents))}</td>"
+                f"<td>{_escape(provenance.generator)}</td>"
+                f"<td>{_escape(provenance.pose_method)}</td>"
+                f"<td>{provenance.pose_rmsd:.3f}</td></tr>"
+            )
+        parts.append("</tbody></table></div>")
 
     if rejected:
         parts += [

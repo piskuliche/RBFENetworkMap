@@ -14,10 +14,10 @@ Four plugin kinds, each an abstract base class in :mod:`rbfenetmap.core.meta`:
      - ``mcss``, ``mcss-e``, ``mcss-e2``, ``cartograph``, ``kartograf``, ``identity``
    * - scorer
      - Reduce descriptors to a cost
-     - ``linear``, ``lomaplike``, ``softcore-size``
+     - ``linear``, ``lomaplike``, ``softcore-size``, ``variance``
    * - planner
      - Select the final edge set
-     - ``mst``, ``star``, ``explicit``, ``complete``
+     - ``mst``, ``star``, ``explicit``, ``complete``, ``optimal``
    * - exporter
      - Serialize for a downstream program
      - ``json``, ``edgelist``, ``graphml``, ``amber``, ``html``

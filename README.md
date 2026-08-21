@@ -39,8 +39,8 @@ Four stages, each pluggable:
 2. **Repair** — the interesting part. A mapper may leave the soft-core in several
    disconnected pieces, which no single alchemical transformation can run. The repair
    demotes common-core atoms until the pieces join up, or rejects the edge.
-3. **Score** — reduce descriptors to a cost (`linear`, `lomaplike`, `softcore-size`).
-4. **Plan** — select the final edge set (`mst`, `star`, `explicit`, `complete`).
+3. **Score** — reduce descriptors to a cost (`linear`, `lomaplike`, `softcore-size`, `variance`).
+4. **Plan** — select the final edge set (`mst`, `star`, `explicit`, `complete`, `optimal`).
 
 ## The soft-core repair
 
@@ -105,6 +105,8 @@ The feasible candidate graph is disconnected: 2 components.
 | `--max-cycle-size` | During cycle coverage, ignore candidate additions that would only make larger cycles than this. |
 | `--pair-evaluation adaptive` | Fingerprint-rank all pairs and run expensive mappings in batches until connectivity and redundancy targets are met. |
 | `--cbfe {off,bridge,cycles,all}` | Use counterpoised edges, which need no atom mapping and so are available between *any* two ligands. See below. |
+| `--design {none,a_optimal,d_optimal}` | Select edges by a statistical criterion instead of by cost, using the `optimal` planner. Needs `--scorer variance`, whose totals are predicted standard deviations in kcal/mol. Prefer `d_optimal` when a cycle-closure correction will be applied downstream. See below. |
+| `--design-total-ns` | Split a simulation budget A-optimally across the selected edges and write it into each Amber `.runconfig`. |
 | `--progress` / `--no-progress` | Show or suppress pair-mapping progress. Interactive CLI runs show it automatically. |
 | `--forced-edge` / `--banned-edge` | Absolute. A forced edge bypasses scoring but not feasibility. |
 | `--max-softcore-atoms` | A *feasibility* knob: it changes the candidate pool, not the selection. |
@@ -114,6 +116,32 @@ The feasible candidate graph is disconnected: 2 components.
 Selection guarantees a spanning network **iff** the feasible candidate graph is
 connected: the MST is built first, the redundancy pass only ever adds, and conflicting
 budgets are rejected up front rather than by trimming the tree.
+
+## Statistical optimal design
+
+The Fisher information matrix of a network of relative measurements **is** its weighted
+graph Laplacian: `F_ij = -1/sigma_ij^2` off the diagonal, `F_ii = sum_k 1/sigma_ik^2`, and
+`C = pinv(F)`. That single identity turns edge selection into a matrix-criterion problem.
+
+```bash
+rbfenet plan --ligands ligands.sdf \
+             --scorer variance --planner optimal --design d_optimal \
+             --design-total-ns 500 --out network.json
+```
+
+- **A-optimal** minimises `tr(C)`, the summed variance of the estimates.
+- **D-optimal** minimises `ln det(C)`. Because a Laplacian's pseudo-determinant counts
+  spanning trees, it produces 40–80% more cycles at equal edge count — which is why it is
+  the recommendation whenever cycle-closure correction will be applied.
+
+`--design` under any other planner is **refused, not ignored**, and `--planner optimal`
+without a criterion is refused too. With `--n-edges` unset the design planner uses Pitman's
+floor, `round(n ln n)`; the `mst` planner's default is unchanged.
+
+> **Optimal design buys precision. It does not promise accuracy.** Over five TYK2
+> iterations NetBFE's `tr(C)` fell monotonically 1.08 → 0.78 while the RMSE against
+> experiment *rose* 0.84 → 0.91. Read a falling `tr(C)` as "statistics are no longer the
+> bottleneck", not as evidence the answers improved.
 
 ## Counterpoised (CBFE) edges
 

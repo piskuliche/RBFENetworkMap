@@ -33,7 +33,9 @@ __all__ = (
     "AtomMapping",
     "EdgeKind",
     "EdgeScore",
+    "IntermediateRecord",
     "Ligand",
+    "LigandProvenance",
     "Network",
     "RejectionReason",
     "SoftcoreRepair",
@@ -131,6 +133,109 @@ def parse_edge_key(key: str) -> tuple[str, str]:
 
 
 @dataclass(frozen=True)
+class LigandProvenance:
+    """Where a ligand came from, when it was not read from a file.
+
+    Parameters
+    ----------
+    kind : str
+        What sort of construction produced the ligand. ``"intermediate"`` is the only
+        value this package writes today; the field is a string rather than an enum so a
+        third-party generator can record its own kind without patching this module.
+    generator : str
+        Registered name of the plugin that proposed the molecule.
+    parents : tuple[str, ...]
+        Names of the real ligands it was derived from, sorted. These are the endpoints of
+        the gap the intermediate was invented to bridge.
+    pose_method : str
+        How the conformer was produced -- ``"parent_atom_map"`` when the generator handed
+        over a complete correspondence, ``"mcs_fallback"`` when one had to be recovered.
+        The weaker method is named rather than hidden precisely so it is visible in a
+        report.
+    pose_rmsd : float
+        In-place RMSD, in angstroms, of the posed atoms against the parent coordinates
+        they were taken from. Measured with the same
+        :func:`~rbfenetmap.core.kabsch.core_rmsd` the feasibility gate uses, so it is
+        directly comparable to ``softcore.core_rmsd_threshold``.
+    detail : Mapping[str, Any], optional
+        Free-form annotations from the generator and the poser.
+
+    Raises
+    ------
+    ValueError
+        If *kind* or *generator* is empty, *parents* is empty, or *pose_rmsd* is negative.
+
+    Notes
+    -----
+    A bare ``synthetic: bool`` cannot answer the first question anyone asks of an invented
+    molecule -- from what, by what, and how good is the pose. Recording the answer at
+    construction is also the only place it is knowable: by the time the network reaches an
+    exporter the generator is long gone.
+    """
+
+    kind: str
+    generator: str
+    parents: tuple[str, ...]
+    pose_method: str
+    pose_rmsd: float
+    detail: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+
+    def __post_init__(self) -> None:
+        """Reject a provenance that does not actually identify anything."""
+        if not self.kind:
+            raise ValueError("LigandProvenance.kind must be a non-empty string.")
+        if not self.generator:
+            raise ValueError("LigandProvenance.generator must be a non-empty string.")
+        if not self.parents:
+            raise ValueError(
+                "LigandProvenance.parents must name at least one ligand. A provenance with no "
+                "parents records that a molecule was invented without recording from what, "
+                "which is strictly less useful than no provenance at all."
+            )
+        if math.isnan(self.pose_rmsd) or self.pose_rmsd < 0.0:
+            raise ValueError(f"LigandProvenance.pose_rmsd must be a non-negative number; got {self.pose_rmsd!r}.")
+
+
+@dataclass(frozen=True)
+class IntermediateRecord:
+    """One attempt to invent a ligand bridging a pair, successful or not.
+
+    Parameters
+    ----------
+    source, target : str
+        The gap the generator was asked to bridge.
+    generator : str
+        Registered name of the generator plugin.
+    accepted : bool, optional
+        Whether any molecule survived posing and was added to the ligand set.
+    names : tuple[str, ...], optional
+        Names of the ligands the attempt contributed.
+    rejection : str, optional
+        Why nothing was contributed. A plain string, not a :class:`RejectionReason`: that
+        enum is the vocabulary of *edge* feasibility, and overloading it would make
+        ``core_geometry_mismatch`` mean two different things depending on where it was
+        read from.
+    trace : tuple[str, ...], optional
+        Human-readable log of what the generator and the poser did.
+
+    Notes
+    -----
+    Retained for the same reason rejected candidates are retained on :class:`Network`.
+    Without a record per gap *attempted*, a network where generation ran and found
+    nothing is indistinguishable from one where generation was never enabled -- and those
+    two call for opposite responses from the user.
+    """
+
+    source: str
+    target: str
+    generator: str
+    accepted: bool = False
+    names: tuple[str, ...] = ()
+    rejection: str | None = None
+    trace: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Ligand:
     """A network vertex: one molecule with a single 3D conformer.
 
@@ -149,6 +254,11 @@ class Ligand:
         Where the molecule was read from, for diagnostics.
     metadata : Mapping[str, Any], optional
         Free-form annotations carried through to exported networks.
+    provenance : LigandProvenance, optional
+        Set only on a ligand this package invented; ``None`` for every molecule read from
+        an input file. Appended last and defaulted so every existing positional
+        construction -- including the one in :mod:`rbfenetmap.io.networkio` -- keeps
+        working untouched.
 
     Raises
     ------
@@ -165,6 +275,12 @@ class Ligand:
     silently incomplete: the soft-core region it describes omits atoms that a downstream
     engine will nonetheless have to transform. Requiring ``Chem.AddHs`` up front makes
     that impossible rather than merely unlikely.
+
+    A synthetic ligand is *this* class with :attr:`provenance` set, not a subclass. The
+    network loader constructs :class:`Ligand` directly, so a subclass would silently
+    downgrade to a plain ligand on every round-trip and every ``isinstance`` check
+    downstream would become round-trip-fragile. A field survives that, and survives the
+    :func:`dataclasses.replace` calls in :mod:`rbfenetmap.core.align` as well.
     """
 
     name: str
@@ -172,6 +288,7 @@ class Ligand:
     charge: int
     source: Path | None = None
     metadata: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    provenance: LigandProvenance | None = None
 
     def __post_init__(self) -> None:
         """Validate the name, conformer count, and hydrogen treatment."""
@@ -230,6 +347,61 @@ class Ligand:
             source=source,
             metadata=MappingProxyType(dict(metadata)),
         )
+
+    @classmethod
+    def synthesized(
+        cls,
+        mol: "Chem.Mol",
+        name: str,
+        provenance: LigandProvenance,
+        *,
+        source: Path | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> "Ligand":
+        """Build a ligand this package invented, recording how.
+
+        Parameters
+        ----------
+        mol : rdkit.Chem.Mol
+            Molecule with explicit hydrogens and the single posed 3D conformer.
+        name : str
+            Vertex identifier, normally from
+            :func:`~rbfenetmap.core.intermediates.intermediate_name`.
+        provenance : LigandProvenance
+            Where the molecule came from.
+        source : pathlib.Path, optional
+            Origin, if the molecule was also written somewhere.
+        metadata : Mapping[str, Any], optional
+            Free-form annotations.
+
+        Returns
+        -------
+        Ligand
+            With :attr:`synthetic` true.
+
+        Notes
+        -----
+        A separate constructor rather than a ``provenance=`` keyword on :meth:`from_mol`,
+        because ``from_mol`` collects ``**metadata``: a user annotating a ligand with
+        ``from_mol(mol, name, provenance="ChEMBL")`` would silently be setting this field
+        instead of storing their note. Splitting the two constructors makes the collision
+        impossible rather than merely documented.
+        """
+        from rdkit import Chem
+
+        return cls(
+            name=name,
+            mol=mol,
+            charge=Chem.GetFormalCharge(mol),
+            source=source,
+            metadata=MappingProxyType(dict(metadata or {})),
+            provenance=provenance,
+        )
+
+    @property
+    def synthetic(self) -> bool:
+        """Whether this ligand was invented by the planner rather than supplied."""
+        return self.provenance is not None
 
     @property
     def n_atoms(self) -> int:
@@ -683,6 +855,11 @@ class Network:
         Best-effort constraints that could not be satisfied (for example a requested
         ``edges_per_ligand`` the candidate pool could not support). Hard conflicts raise
         :class:`~rbfenetmap.core.exceptions.NetworkPlanError` instead of landing here.
+    intermediates : tuple[IntermediateRecord, ...]
+        One record per gap intermediate generation was *attempted* on, whether or not it
+        produced anything. Appended last and defaulted, so every existing construction
+        site is unaffected and a network planned with generation off carries an empty
+        tuple that serializes to nothing at all.
     """
 
     ligands: Mapping[str, Ligand]
@@ -691,6 +868,7 @@ class Network:
     planner: str = "unknown"
     options: "NetworkOptions | None" = None
     unmet_constraints: tuple[str, ...] = ()
+    intermediates: tuple[IntermediateRecord, ...] = ()
 
     def to_networkx(self) -> "nx.Graph":
         """Return the selected edges as an undirected :class:`networkx.Graph`.
@@ -749,6 +927,16 @@ class Network:
     def rejected(self) -> tuple[Transformation, ...]:
         """Candidates that were found infeasible."""
         return tuple(c for c in self.candidates if not c.feasible)
+
+    @property
+    def synthetic_ligands(self) -> tuple[Ligand, ...]:
+        """Vertices this package invented rather than read from an input file.
+
+        Derived from the ligands themselves rather than tracked separately: a second
+        registry of which names are synthetic is a second source of truth that can
+        disagree with the first, and the disagreement would surface as a wrong export.
+        """
+        return tuple(ligand for ligand in self.ligands.values() if ligand.synthetic)
 
     @property
     def rbfe_edges(self) -> tuple[Transformation, ...]:

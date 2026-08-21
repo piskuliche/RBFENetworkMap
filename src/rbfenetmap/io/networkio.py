@@ -8,6 +8,12 @@ are meaningless against a molecule that has been re-read with different atom ord
 
 Rejected candidates are written too. They cost little and they are what explains a
 disconnected or sparse network after the fact.
+
+Two fields are written only when they carry something -- a ligand's ``provenance`` and a
+network's ``intermediates``. Absence already means "not set", so emitting a null or an
+empty list would add a difference to every file ever written in order to convey nothing,
+and would break the property that regenerating an all-real network reproduces it
+byte-for-byte.
 """
 
 from __future__ import annotations
@@ -23,7 +29,9 @@ from rbfenetmap.core.models import (
     AtomMapping,
     EdgeKind,
     EdgeScore,
+    IntermediateRecord,
     Ligand,
+    LigandProvenance,
     Network,
     RejectionReason,
     SoftcoreRepair,
@@ -37,14 +45,69 @@ __all__ = ("SCHEMA_VERSION", "dump_network", "load_network", "network_to_dict")
 SCHEMA_VERSION = 1
 
 
+def _provenance_to_dict(provenance: LigandProvenance) -> dict[str, Any]:
+    """Serialize a ligand provenance."""
+    return {
+        "kind": provenance.kind,
+        "generator": provenance.generator,
+        "parents": list(provenance.parents),
+        "pose_method": provenance.pose_method,
+        "pose_rmsd": provenance.pose_rmsd,
+        "detail": dict(provenance.detail),
+    }
+
+
+def _provenance_from_dict(data: dict[str, Any]) -> LigandProvenance:
+    """Rebuild a ligand provenance from its serialized form."""
+    return LigandProvenance(
+        kind=data["kind"],
+        generator=data["generator"],
+        parents=tuple(data.get("parents", ())),
+        pose_method=data.get("pose_method", "unknown"),
+        pose_rmsd=float(data.get("pose_rmsd", 0.0)),
+        detail=MappingProxyType(dict(data.get("detail") or {})),
+    )
+
+
+def _record_to_dict(record: IntermediateRecord) -> dict[str, Any]:
+    """Serialize one intermediate-generation attempt."""
+    return {
+        "source": record.source,
+        "target": record.target,
+        "generator": record.generator,
+        "accepted": record.accepted,
+        "names": list(record.names),
+        "rejection": record.rejection,
+        "trace": list(record.trace),
+    }
+
+
+def _record_from_dict(data: dict[str, Any]) -> IntermediateRecord:
+    """Rebuild an intermediate-generation attempt from its serialized form."""
+    return IntermediateRecord(
+        source=data["source"],
+        target=data["target"],
+        generator=data.get("generator", "unknown"),
+        accepted=bool(data.get("accepted", False)),
+        names=tuple(data.get("names", ())),
+        rejection=data.get("rejection"),
+        trace=tuple(data.get("trace", ())),
+    )
+
+
 def _ligand_to_dict(ligand: Ligand) -> dict[str, Any]:
-    """Serialize a ligand, embedding its molecule as a molblock."""
+    """Serialize a ligand, embedding its molecule as a molblock.
+
+    ``provenance`` is omitted entirely on a ligand that has none, which is every ligand
+    read from an input file. See the module docstring.
+    """
     return {
         "name": ligand.name,
         "charge": ligand.charge,
         "source": str(ligand.source) if ligand.source else None,
         "metadata": dict(ligand.metadata),
         "molblock": Chem.MolToMolBlock(ligand.mol, kekulize=False),
+        **({"provenance": _provenance_to_dict(ligand.provenance)} if ligand.provenance is not None else {}),
     }
 
 
@@ -59,6 +122,7 @@ def _ligand_from_dict(data: dict[str, Any]) -> Ligand:
         charge=int(data["charge"]),
         source=Path(data["source"]) if data.get("source") else None,
         metadata=MappingProxyType(dict(data.get("metadata") or {})),
+        provenance=_provenance_from_dict(data["provenance"]) if data.get("provenance") else None,
     )
 
 
@@ -105,6 +169,11 @@ def _edge_from_dict(data: dict[str, Any]) -> Transformation:
     before counterpoised edges existed still load. That is why adding the field did not
     bump :data:`SCHEMA_VERSION`: a bump would have made every one of those files
     unreadable to buy a compatibility guarantee the default already provides.
+
+    The same reasoning governs a ligand's ``provenance`` and a network's
+    ``intermediates``: absent-means-default is a complete compatibility story, so neither
+    bumped the version either. A bump is for *removing* a field or changing what an
+    existing one means -- the two cases a default cannot cover.
     """
     mapping_data = data["mapping"]
     mapping = AtomMapping(
@@ -199,6 +268,14 @@ def network_to_dict(network: Network) -> dict[str, Any]:
         "ligands": [_ligand_to_dict(ligand) for ligand in network.ligands.values()],
         "edges": [_edge_to_dict(edge) for edge in network.edges],
         "candidates": [_edge_to_dict(edge) for edge in network.candidates],
+        # Omitted when empty, for the same reason `compat` is: a network planned without
+        # intermediate generation must serialize exactly as it did before generation
+        # existed, or the golden baseline stops meaning anything.
+        **(
+            {"intermediates": [_record_to_dict(record) for record in network.intermediates]}
+            if network.intermediates
+            else {}
+        ),
     }
 
 
@@ -258,4 +335,5 @@ def load_network(path: Path) -> Network:
         planner=data.get("planner", "unknown"),
         options=options,
         unmet_constraints=tuple(data.get("unmet_constraints", ())),
+        intermediates=tuple(_record_from_dict(item) for item in data.get("intermediates", ())),
     )

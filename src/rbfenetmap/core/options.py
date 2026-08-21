@@ -171,7 +171,14 @@ class MappingOptions:
     Parameters
     ----------
     timeout : int
-        Seconds allowed for an MCS search.
+        Seconds allowed for a single MCS search.
+
+        **This is the memory knob as much as the time knob.** ``FindMCS`` allocates
+        monotonically while it searches and frees nothing until it returns, at roughly
+        40 MB per second on drug-sized ligands, so peak usage is about
+        ``40 MB/s * timeout * jobs``. The default of 60 with ``jobs=8`` is therefore some
+        20 GB of search structures before a single candidate is retained. Raise it
+        knowingly.
     ring_matches_ring_only, complete_rings_only : bool
         RDKit ``FindMCS`` settings, mirroring the values ``BuildEdges._find_mcs`` uses.
     match_valences, match_chiral_tag : bool

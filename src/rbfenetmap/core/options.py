@@ -553,13 +553,18 @@ class NetworkOptions:
             # keeps ``--compat v0.4`` reproducing v0.4 on the day the default moves.
             "intermediates": IntermediateOptions(
                 mode="off",
-                generator="fragment-swap",
+                generator="pairmap",
                 max_intermediates=None,
                 max_gaps=None,
                 max_molecules=4,
                 seed=0xF00D,
                 max_pose_attempts=10,
                 pose_rmsd_factor=0.5,
+                min_link_score=0.2,
+                max_dist=3,
+                max_cycle=4,
+                max_subgraph_dist=4,
+                beta=0.1,
             ),
         }
         pinned.update(overrides)

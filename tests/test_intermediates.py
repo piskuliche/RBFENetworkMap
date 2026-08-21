@@ -281,7 +281,7 @@ class TestRegistry:
         assert isinstance(create_intermediate("fragment-swap"), AbstractIntermediateGenerator)
 
     def test_active_listing(self):
-        assert list_active_intermediates() == ["fragment-swap"]
+        assert list_active_intermediates() == ["fragment-swap", "pairmap"]
 
     def test_unknown_name_names_the_known_ones(self):
         with pytest.raises(PluginError, match="fragment-swap"):

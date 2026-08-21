@@ -27,7 +27,10 @@ __all__ = (
 
 _KIND = "intermediate"
 
-_MODULE_MAP = {"FragmentSwapGenerator": "rbfenetmap.plugins.intermediates.fragment_swap"}
+_MODULE_MAP = {
+    "FragmentSwapGenerator": "rbfenetmap.plugins.intermediates.fragment_swap",
+    "PairMapGenerator": "rbfenetmap.plugins.intermediates.pairmap_generator",
+}
 
 BUILTIN_INTERMEDIATES: dict[str, PluginSpec] = {
     "fragment-swap": PluginSpec(
@@ -36,10 +39,20 @@ BUILTIN_INTERMEDIATES: dict[str, PluginSpec] = {
         target="rbfenetmap.plugins.intermediates.fragment_swap:FragmentSwapGenerator",
         description="Hybrids swapping one substituent at a time between the two parents.",
         requires=("rdkit", "numpy"),
-    )
+    ),
+    "pairmap": PluginSpec(
+        name="pairmap",
+        kind=_KIND,
+        target="rbfenetmap.plugins.intermediates.pairmap_generator:PairMapGenerator",
+        description="Searched subnetwork of R-group recombinations, after Furui et al. (PairMap, JCIM 2025).",
+        requires=("rdkit", "numpy"),
+    ),
 }
 
-INTERMEDIATE_PROFILES: dict[str, tuple[str, ...]] = {"all": tuple(BUILTIN_INTERMEDIATES), "core": ("fragment-swap",)}
+INTERMEDIATE_PROFILES: dict[str, tuple[str, ...]] = {
+    "all": tuple(BUILTIN_INTERMEDIATES),
+    "core": ("fragment-swap", "pairmap"),
+}
 
 
 def available_intermediates() -> dict[str, PluginSpec]:

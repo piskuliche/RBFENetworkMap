@@ -102,7 +102,7 @@ COMPAT_CLI_PINS: dict[str, dict[str, Any]] = {
         # let `--compat v0.4 --intermediates bridge` quietly plan a network v0.4 could not
         # have produced, which is the exact surprise --compat exists to prevent.
         "intermediates": "off",
-        "intermediate_generator": "fragment-swap",
+        "intermediate_generator": "pairmap",
         "max_intermediates": None,
         "max_intermediate_gaps": None,
         "intermediates_per_gap": 4,
@@ -529,7 +529,7 @@ def add_network_arguments(parser: argparse.ArgumentParser) -> None:
     )
     group.add_argument(
         "--intermediate-generator",
-        default="fragment-swap",
+        default="pairmap",
         metavar="NAME",
         help="Intermediate generator plugin (default: %(default)s). Constructed only when --intermediates is on.",
     )

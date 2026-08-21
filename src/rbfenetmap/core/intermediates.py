@@ -185,7 +185,7 @@ class IntermediateOptions:
     """
 
     mode: IntermediateMode = "off"
-    generator: str = "fragment-swap"
+    generator: str = "pairmap"
     max_intermediates: int | None = None
     max_gaps: int | None = None
     max_molecules: int = 4

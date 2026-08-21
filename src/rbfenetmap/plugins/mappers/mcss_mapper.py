@@ -17,10 +17,44 @@ from rbfenetmap.core.kabsch import core_rmsd
 from rbfenetmap.core.mcs import mcs_embeddings, mcs_query
 from rbfenetmap.core.meta.mappers import AbstractMapper
 from rbfenetmap.core.models import AtomMapping, Ligand
-from rbfenetmap.core.molgraph import connected_components_of, mol_to_graph
+from rbfenetmap.core.molgraph import connected_components_of, hydrogen_parents, mol_to_graph
 from rbfenetmap.core.options import CorePruningPolicy, MappingOptions
 
 __all__ = ("MCSSExtended2Mapper", "MCSSExtendedMapper", "MCSSMapper")
+
+
+def _pair_hydrogens(source: Ligand, target: Ligand, core: dict[int, int]) -> dict[int, int]:
+    """Extend a heavy-atom correspondence to the hydrogens hanging off it.
+
+    The MCS runs on the heavy-atom graph -- see
+    :func:`~rbfenetmap.core.mcs._suppress_hydrogens` for why -- so *core* pairs only heavy
+    atoms. The hydrogens have to be paired here, and they cannot simply be left out.
+
+    Leaving them out is not the harmless-looking omission it appears to be. Every unpaired
+    hydrogen is soft-core, so a molecule's hydrogens would arrive as dozens of one-atom
+    soft-core regions scattered over atoms whose parents are all common core. The repair's
+    hydrogen-follows-parent rule is deliberately one-way and would not reclaim them, so the
+    Steiner search would set about bridging them and demote the entire core doing it.
+
+    Pairing is by parent, in index order. Hydrogens on the same heavy atom are chemically
+    interchangeable -- the three on a methyl are not distinguishable by anything the
+    transformation cares about -- so any consistent assignment is as good as another, and a
+    deterministic one keeps the mapping reproducible. Where the two parents carry different
+    numbers of hydrogens, :func:`zip` pairs what it can and the remainder stays soft-core,
+    which is the correct description of, say, ``R-CH2- -> R-CHF-``.
+    """
+    parents_1: dict[int, list[int]] = {}
+    for hydrogen, parent in hydrogen_parents(source.mol).items():
+        parents_1.setdefault(parent, []).append(hydrogen)
+    parents_2: dict[int, list[int]] = {}
+    for hydrogen, parent in hydrogen_parents(target.mol).items():
+        parents_2.setdefault(parent, []).append(hydrogen)
+
+    extended = dict(core)
+    for parent_1, parent_2 in core.items():
+        for hydrogen_1, hydrogen_2 in zip(sorted(parents_1.get(parent_1, ())), sorted(parents_2.get(parent_2, ()))):
+            extended[hydrogen_1] = hydrogen_2
+    return extended
 
 
 class MCSSMapper(AbstractMapper):
@@ -90,6 +124,7 @@ class MCSSMapper(AbstractMapper):
             )
 
         core = self._select_pairing(source, target, matches_1, matches_2, options)
+        core = _pair_hydrogens(source, target, core)
         mapping = AtomMapping.from_core_pairs(
             core, n_atoms_1=source.n_atoms, n_atoms_2=target.n_atoms, method=self.name
         )

@@ -127,5 +127,84 @@ class TestSoftcoreSizeScorer:
         assert score.total == pytest.approx(7.0)
 
 
+class TestVarianceScorer:
+    """NetBFE eq. 19, checked against numbers a reader can compute on paper.
+
+    ``s = w0 + w1 sqrt(h) + w2 sqrt(H)`` with ``w = (1.0, 1.0, 0.5)``, ``h`` the larger
+    soft-core heavy-atom count and ``H`` the larger total heavy-atom count. Every expected
+    value below is written as that arithmetic rather than as a decimal, so a reader checks
+    the formula rather than trusting a constant.
+    """
+
+    def test_a_zero_atom_edge_is_the_intercept(self):
+        """The floor: an edge that transforms nothing still carries one run's noise."""
+        score = create_scorer("variance").score_edge(
+            descriptors(n_softcore_max_heavy=0.0, n_heavy_1=0.0, n_heavy_2=0.0), rejections=[]
+        )
+        assert score.total == pytest.approx(1.0)
+
+    def test_it_matches_the_published_form(self):
+        score = create_scorer("variance").score_edge(
+            descriptors(n_softcore_max_heavy=4.0, n_heavy_1=16.0, n_heavy_2=9.0), rejections=[]
+        )
+        assert score.total == pytest.approx(1.0 + math.sqrt(4.0) + 0.5 * math.sqrt(16.0))
+
+    def test_total_heavy_takes_the_larger_side(self):
+        """``max(H_ij, H_ji)``: order of the two ligands must not change the prediction."""
+        scorer = create_scorer("variance")
+        forward = scorer.score_edge(descriptors(n_heavy_1=25.0, n_heavy_2=4.0), rejections=[])
+        reverse = scorer.score_edge(descriptors(n_heavy_1=4.0, n_heavy_2=25.0), rejections=[])
+        assert forward.total == pytest.approx(reverse.total)
+        assert forward.total == pytest.approx(1.0 + 0.5 * math.sqrt(25.0))
+
+    def test_the_contributions_name_the_three_terms(self):
+        score = create_scorer("variance").score_edge(
+            descriptors(n_softcore_max_heavy=9.0, n_heavy_1=36.0), rejections=[]
+        )
+        assert set(score.contributions) == {"intercept", "softcore_heavy", "total_heavy"}
+        assert score.contributions["softcore_heavy"] == pytest.approx(3.0)
+        assert score.contributions["total_heavy"] == pytest.approx(3.0)
+
+    def test_it_grows_sublinearly_in_the_softcore(self):
+        """Doubling the soft-core must not double the predicted noise."""
+        scorer = create_scorer("variance")
+        small = scorer.score_edge(descriptors(n_softcore_max_heavy=4.0), rejections=[]).total
+        large = scorer.score_edge(descriptors(n_softcore_max_heavy=8.0), rejections=[]).total
+        assert small < large < 2 * small
+
+    def test_missing_descriptors_degrade_to_the_intercept(self):
+        score = create_scorer("variance").score_edge({}, rejections=[])
+        assert score.total == pytest.approx(1.0)
+
+    def test_a_rejection_propagates_without_a_cost(self):
+        score = create_scorer("variance").score_edge(
+            descriptors(n_softcore_max_heavy=4.0), rejections=[RejectionReason.SOFTCORE_TOO_LARGE]
+        )
+        assert not score.feasible
+        assert score.rejections == (RejectionReason.SOFTCORE_TOO_LARGE,)
+
+    def test_the_prediction_is_always_positive(self):
+        """The Fisher weight is ``1 / sigma ** 2``; a zero would be infinite information."""
+        score = create_scorer("variance").score_edge({}, rejections=[])
+        assert score.total > 0
+
+    def test_weights_are_overridable(self):
+        score = create_scorer("variance", weights={"intercept": 0.5}).score_edge(
+            descriptors(n_softcore_max_heavy=4.0, n_heavy_1=0.0, n_heavy_2=0.0), rejections=[]
+        )
+        assert score.total == pytest.approx(0.5 + 2.0)
+
+    def test_an_unknown_term_is_rejected(self):
+        with pytest.raises(ValueError, match="Unknown variance term"):
+            create_scorer("variance", weights={"softcore_atoms": 2.0})
+
+    def test_a_negative_weight_is_rejected(self):
+        with pytest.raises(ValueError, match="negative"):
+            create_scorer("variance", weights={"softcore_heavy": -1.0})
+
+    def test_describe_weights_reports_the_effective_values(self):
+        assert create_scorer("variance").describe_weights()["total_heavy"] == pytest.approx(0.5)
+
+
 def test_every_builtin_scorer_is_available_without_optional_deps():
-    assert set(available_scorers()) == {"linear", "lomaplike", "softcore-size"}
+    assert set(available_scorers()) == {"linear", "lomaplike", "softcore-size", "variance"}

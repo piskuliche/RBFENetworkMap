@@ -25,6 +25,7 @@ _MODULE_MAP = {
     "LinearScorer": "rbfenetmap.plugins.scorers.linear_scorer",
     "LomapLikeScorer": "rbfenetmap.plugins.scorers.lomaplike_scorer",
     "SoftcoreSizeScorer": "rbfenetmap.plugins.scorers.softcore_size_scorer",
+    "VarianceScorer": "rbfenetmap.plugins.scorers.variance_scorer",
 }
 
 BUILTIN_SCORERS: dict[str, PluginSpec] = {
@@ -47,6 +48,13 @@ BUILTIN_SCORERS: dict[str, PluginSpec] = {
         kind=_KIND,
         target="rbfenetmap.plugins.scorers.softcore_size_scorer:SoftcoreSizeScorer",
         description="Baseline: cost equals the larger soft-core heavy-atom count.",
+        requires=(),
+    ),
+    "variance": PluginSpec(
+        name="variance",
+        kind=_KIND,
+        target="rbfenetmap.plugins.scorers.variance_scorer:VarianceScorer",
+        description="Predicted per-edge standard deviation in kcal/mol; the scale optimal design needs.",
         requires=(),
     ),
 }

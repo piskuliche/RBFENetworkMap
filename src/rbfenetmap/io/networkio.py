@@ -25,6 +25,7 @@ from typing import Any
 
 from rdkit import Chem
 
+from rbfenetmap.core.intermediates import IntermediateOptions
 from rbfenetmap.core.models import (
     AtomMapping,
     EdgeKind,
@@ -256,6 +257,21 @@ def network_to_dict(network: Network) -> dict[str, Any]:
                     "core_rmsd_threshold": options.softcore.core_rmsd_threshold,
                     "charge_change_policy": options.softcore.charge_change_policy,
                 },
+                # Always written, like "softcore" and unlike "compat". An absent block
+                # means "generation off", which is also what the defaults say -- but a
+                # network whose vertex set was *invented* has to state the settings that
+                # invented it, and a block that appeared only sometimes would make the
+                # reader check two things to learn one.
+                "intermediates": {
+                    "mode": options.intermediates.mode,
+                    "generator": options.intermediates.generator,
+                    "max_intermediates": options.intermediates.max_intermediates,
+                    "max_gaps": options.intermediates.max_gaps,
+                    "max_molecules": options.intermediates.max_molecules,
+                    "seed": options.intermediates.seed,
+                    "max_pose_attempts": options.intermediates.max_pose_attempts,
+                    "pose_rmsd_factor": options.intermediates.pose_rmsd_factor,
+                },
                 # Omitted entirely when unset, so a network planned without --compat
                 # serializes byte-for-byte as it did before the flag existed. An
                 # absent key already means "not pinned", so writing a null would add a
@@ -308,6 +324,7 @@ def load_network(path: Path) -> Network:
     options = None
     if options_data:
         softcore_data = options_data.get("softcore") or {}
+        intermediate_data = options_data.get("intermediates") or {}
         options = NetworkOptions(
             pair_strategy=options_data.get("pair_strategy", "all_unordered_pairs"),
             hub=options_data.get("hub"),
@@ -326,6 +343,7 @@ def load_network(path: Path) -> Network:
             cbfe_atom_weight=options_data.get("cbfe_atom_weight", 0.05),
             compat=options_data.get("compat"),
             softcore=SoftcorePolicy(**softcore_data) if softcore_data else SoftcorePolicy(),
+            intermediates=IntermediateOptions(**intermediate_data) if intermediate_data else IntermediateOptions(),
         )
 
     return Network(

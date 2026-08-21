@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
+from rbfenetmap.core.intermediates import INTERMEDIATE_MODES, IntermediateOptions
 from rbfenetmap.core.models import EDGE_SEPARATOR, parse_edge_key
 
 __all__ = (
@@ -371,6 +372,17 @@ class NetworkOptions:
         with how much there is to decouple.
     softcore : SoftcorePolicy
         Feasibility policy handed to the repair.
+    intermediates : IntermediateOptions
+        Whether the pipeline may *invent* ligands to bridge pairs no mapping can relate,
+        and how many. Off by default.
+
+        This is the only knob in the class that changes the **vertex** set rather than the
+        edge set, which is why it sits between ``max_softcore_atoms`` and ``cbfe_mode`` in
+        the precedence table: it widens the pool the planner is handed, and it does so
+        before the planner runs, so a gap an intermediate closed is simply not a gap by
+        the time CBFE eligibility is evaluated. That ordering is the whole of "stay
+        relative, then fall back to counterpoised" -- there is no precedence flag behind
+        it.
     compat : str, optional
         The released behaviour this run was pinned to, or ``None``. Set by
         :meth:`preset`; recorded so a planned network states which behaviour produced
@@ -409,6 +421,7 @@ class NetworkOptions:
     cbfe_base_cost: float = 8.0
     cbfe_atom_weight: float = 0.05
     softcore: SoftcorePolicy = field(default_factory=SoftcorePolicy)
+    intermediates: IntermediateOptions = field(default_factory=IntermediateOptions)
     compat: str | None = None
 
     def __post_init__(self) -> None:
@@ -445,6 +458,10 @@ class NetworkOptions:
             raise ValueError("cbfe_base_cost must not be negative.")
         if self.cbfe_atom_weight < 0:
             raise ValueError("cbfe_atom_weight must not be negative.")
+        if self.intermediates.mode not in INTERMEDIATE_MODES:
+            raise ValueError(
+                f"intermediates.mode must be one of {list(INTERMEDIATE_MODES)}; got {self.intermediates.mode!r}."
+            )
         if self.compat is not None and self.compat not in COMPAT_LEVELS:
             raise ValueError(f"Unknown compat level {self.compat!r}. Known: {list(COMPAT_LEVELS)}.")
         if self.pair_strategy == "star" and not self.hub:
@@ -531,6 +548,19 @@ class NetworkOptions:
                     demote_light_element_swap=True,
                 ),
             ),
+            # v0.4 could not invent a ligand at all, so the pinned value is generation
+            # switched off. Pinning it rather than leaving it to the field default is what
+            # keeps ``--compat v0.4`` reproducing v0.4 on the day the default moves.
+            "intermediates": IntermediateOptions(
+                mode="off",
+                generator="fragment-swap",
+                max_intermediates=None,
+                max_gaps=None,
+                max_molecules=4,
+                seed=0xF00D,
+                max_pose_attempts=10,
+                pose_rmsd_factor=0.5,
+            ),
         }
         pinned.update(overrides)
         pinned["compat"] = level
@@ -555,6 +585,39 @@ class NetworkOptions:
     def cbfe_closes_cycles(self) -> bool:
         """Whether CBFE edges may be spent putting ligands on a cycle."""
         return self.cbfe_mode == "cycles"
+
+    @property
+    def generates_intermediates(self) -> bool:
+        """Whether the pipeline may invent ligands for this run."""
+        return self.intermediates.enabled
+
+    def intermediate_headroom(self, n_ligands: int) -> int | None:
+        """Return how many ligands may be invented before ``n_edges`` runs out.
+
+        Parameters
+        ----------
+        n_ligands : int
+            Size of the *real* ligand set.
+
+        Returns
+        -------
+        int or None
+            ``None`` when ``n_edges`` is unset, so nothing constrains generation here.
+            Otherwise ``n_edges - (n_ligands - 1)``, possibly zero or negative.
+
+        Notes
+        -----
+        **The budget is spent, never inflated.** Every invented ligand is another vertex,
+        so a spanning network over the augmented set needs one more edge than it did
+        before. Quietly raising ``n_edges`` to pay for a molecule the user never asked for
+        would be exactly the silent over-spend :meth:`check_edge_budget` refuses to make
+        in the other direction. When the headroom runs out, generation stops and says so
+        on ``unmet_constraints``; it does not raise, because unlike a spanning tree that
+        cannot fit, an intermediate that cannot fit leaves a perfectly valid network.
+        """
+        if self.n_edges is None:
+            return None
+        return self.n_edges - max(n_ligands - 1, 0)
 
     def check_edge_budget(self, n_ligands: int) -> None:
         """Verify ``n_edges`` can support a spanning network over *n_ligands*.

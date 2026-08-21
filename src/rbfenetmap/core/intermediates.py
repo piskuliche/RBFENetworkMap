@@ -48,9 +48,9 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Literal, Mapping, Sequence
 
-from rbfenetmap.core.models import Ligand, LigandProvenance
+from rbfenetmap.core.models import IntermediateRecord, Ligand, LigandProvenance
 from rbfenetmap.core.posing import POSE_RMSD_FACTOR, PoseDonor, PoseResult, pose_intermediate
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -61,10 +61,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 __all__ = (
     "INTERMEDIATE_KIND",
     "INTERMEDIATE_NAME_PREFIX",
+    "INTERMEDIATE_MODES",
+    "IntermediateMode",
     "IntermediateOptions",
     "IntermediateProposal",
     "ProposedLink",
     "ProposedMolecule",
+    "describe_intermediate_attempts",
     "intermediate_name",
     "reserve_intermediate_names",
     "synthesize_ligand",
@@ -81,13 +84,50 @@ INTERMEDIATE_NAME_PREFIX = "int_"
 
 _HASH_LENGTH = 6
 
+#: How freely the pipeline may invent ligands.
+#:
+#: There is deliberately no ``"all"``. For :attr:`NetworkOptions.cbfe_mode` that member
+#: means "every edge is counterpoised", which is a coherent request; "every pair gets an
+#: intermediate" is not one, because most pairs already have a perfectly good direct edge
+#: and inventing a molecule for them adds two calculations to avoid nothing.
+INTERMEDIATE_MODES: tuple[str, ...] = ("off", "bridge", "gaps")
+
+IntermediateMode = Literal["off", "bridge", "gaps"]
+
 
 @dataclass(frozen=True)
 class IntermediateOptions:
-    """Settings a generator and the poser share.
+    """Whether to invent ligands, how many, and how hard to try posing them.
 
     Parameters
     ----------
+    mode : {"off", "bridge", "gaps"}, optional
+        Which gaps are offered to the generator.
+
+        - ``"off"`` (default) -- none. No generator is even constructed, so a run that
+          does not ask for intermediates never imports one.
+        - ``"bridge"`` -- only pairs whose endpoints fall in different components of the
+          feasible candidate graph. This is the mode that turns a hard connectivity
+          failure into a planned network, and it is the analogue of
+          ``cbfe_mode="bridge"``.
+        - ``"gaps"`` -- everything ``"bridge"`` does, and additionally infeasible pairs
+          *inside* a component. Those are already reachable by some path, so an
+          intermediate there buys accuracy rather than connectivity.
+
+        Forced pairs with no feasible mapping are offered under both non-off modes: the
+        user demanded that comparison, and an intermediate is the only way to keep it
+        relative.
+    generator : str, optional
+        Registered name of the generator plugin to construct. Resolved lazily, and only
+        when *mode* is not ``"off"``.
+    max_intermediates : int, optional
+        Cap on how many ligands one run may invent in total. ``None`` means only the
+        per-gap cap and the edge budget constrain it.
+    max_gaps : int, optional
+        Cap on how many gaps are offered to the generator, taken in decreasing
+        fingerprint similarity. ``None`` offers every gap. This is the knob that keeps
+        generation off the tail of an O(n^2) rejection list, where the pairs are least
+        similar and least likely to be bridgeable anyway.
     max_molecules : int, optional
         Cap on how many molecules a generator may propose for one gap. A generator that
         enumerates every single-substituent swap on a heavily decorated pair can produce
@@ -104,17 +144,22 @@ class IntermediateOptions:
     Raises
     ------
     ValueError
-        If any value is out of range.
+        If *mode* is unknown, or any budget is out of range.
 
     Notes
     -----
-    Deliberately *not* on :class:`~rbfenetmap.core.options.NetworkOptions`. Nothing in
-    this phase runs generation from the pipeline, and adding a field to the serialized
-    options block would change the bytes of every network file written -- including the
-    all-real ones that must stay byte-identical. The pipeline-facing knobs land with the
-    pipeline that reads them.
+    Reachable as :attr:`~rbfenetmap.core.options.NetworkOptions.intermediates`, nested the
+    way :class:`~rbfenetmap.core.options.SoftcorePolicy` is. It was deliberately left off
+    ``NetworkOptions`` while nothing read it, because a field on the serialized options
+    block that no stage consumes is a knob that lies. The pipeline now consumes every one
+    of these, so the nesting is what makes a planned network state the settings that
+    invented its vertices.
     """
 
+    mode: IntermediateMode = "off"
+    generator: str = "fragment-swap"
+    max_intermediates: int | None = None
+    max_gaps: int | None = None
     max_molecules: int = 4
     seed: int = 0xF00D
     max_pose_attempts: int = 10
@@ -122,12 +167,35 @@ class IntermediateOptions:
 
     def __post_init__(self) -> None:
         """Reject nonsensical budgets up front."""
+        if self.mode not in INTERMEDIATE_MODES:
+            raise ValueError(f"mode must be one of {list(INTERMEDIATE_MODES)}; got {self.mode!r}.")
+        if not self.generator:
+            raise ValueError("generator must name a registered intermediate generator plugin.")
+        if self.max_intermediates is not None and self.max_intermediates < 1:
+            raise ValueError("max_intermediates must be at least 1 when set.")
+        if self.max_gaps is not None and self.max_gaps < 1:
+            raise ValueError("max_gaps must be at least 1 when set.")
         if self.max_molecules < 1:
             raise ValueError("max_molecules must be at least 1.")
         if self.max_pose_attempts < 1:
             raise ValueError("max_pose_attempts must be at least 1.")
         if not 0.0 < self.pose_rmsd_factor <= 1.0:
             raise ValueError("pose_rmsd_factor must lie in (0, 1].")
+
+    @property
+    def enabled(self) -> bool:
+        """Whether generation runs at all."""
+        return self.mode != "off"
+
+    @property
+    def bridges_components(self) -> bool:
+        """Whether cross-component gaps are offered to the generator."""
+        return self.mode in ("bridge", "gaps")
+
+    @property
+    def fills_internal_gaps(self) -> bool:
+        """Whether infeasible pairs inside one component are offered too."""
+        return self.mode == "gaps"
 
 
 @dataclass(frozen=True)
@@ -421,3 +489,41 @@ def synthesize_ligand(
     )
     ligand = Ligand.synthesized(result.mol, intermediate_name(proposed.parents, result.mol), provenance)
     return ligand, result
+
+
+def describe_intermediate_attempts(records: Sequence["IntermediateRecord"]) -> str:
+    """Summarise what generation was asked to do and what came of it.
+
+    Parameters
+    ----------
+    records : Sequence[IntermediateRecord]
+        One per gap *attempted*, in the order they were attempted.
+
+    Returns
+    -------
+    str
+        A short paragraph naming each gap offered to the generator and why it was
+        refused, or the empty string when *records* is empty.
+
+    Notes
+    -----
+    The paragraph exists to discharge the same obligation the CBFE branch of
+    :func:`~rbfenetmap.plugins.planners.mst_planner._describe_disconnection` discharges:
+    "disconnected" alone tells a user nothing they can act on, and a user who switched
+    generation *on* and still got a disconnection needs to know whether their gaps were
+    never offered, offered and declined, or bridged by molecules that failed the geometry
+    gate. Those three call for entirely different responses -- raise ``max_gaps``, change
+    generator, loosen ``core_rmsd_threshold`` -- and only this record distinguishes them.
+    """
+    if not records:
+        return ""
+    accepted = [record for record in records if record.accepted]
+    lines = [
+        f"  Intermediate generation was offered {len(records)} gap(s) and bridged {len(accepted)}:",
+        *(
+            f"    {record.source}~{record.target}: "
+            + (f"accepted {list(record.names)}" if record.accepted else f"refused ({record.rejection or 'unknown'})")
+            for record in records
+        ),
+    ]
+    return "\n".join(lines)

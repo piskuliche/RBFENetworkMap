@@ -8,12 +8,13 @@ the point is to measure every edge rather than to economise.
 
 from __future__ import annotations
 
+import math
 from typing import ClassVar, Mapping, Sequence
 
 from rbfenetmap.core.exceptions import NetworkPlanError
 from rbfenetmap.core.meta.planners import AbstractNetworkPlanner
 from rbfenetmap.core.models import Ligand, Network, Transformation, parse_edge_key
-from rbfenetmap.core.options import NetworkOptions
+from rbfenetmap.core.options import HubSelection, NetworkOptions
 
 __all__ = ("CompletePlanner", "ExplicitPlanner", "StarPlanner")
 
@@ -33,8 +34,9 @@ def _feasible_by_pair(candidates: Sequence[Transformation]) -> dict[tuple[str, s
 class StarPlanner(AbstractNetworkPlanner):
     """Connect every ligand to a single hub.
 
-    The hub defaults to the ligand with the lowest total cost to everything else, which
-    is the natural reference: the most central compound in the series.
+    The hub defaults to the most central compound in the series. What "central" means is
+    ``hub_selection``: the ligand with the most feasible partners (the default), or the one
+    with the lowest summed cost to the partners it has.
     """
 
     name: ClassVar[str] = "star"
@@ -46,7 +48,7 @@ class StarPlanner(AbstractNetworkPlanner):
         self.check_cbfe_support(options)
         feasible = _feasible_by_pair(candidates)
         feasible = {p: e for p, e in feasible.items() if p not in options.banned_pairs}
-        hub = options.hub or self._pick_hub(ligands, feasible)
+        hub = options.hub or self._pick_hub(ligands, feasible, options.hub_selection)
         if hub not in ligands:
             raise NetworkPlanError(f"Hub {hub!r} is not among the ligands.")
 
@@ -75,16 +77,51 @@ class StarPlanner(AbstractNetworkPlanner):
         return network
 
     @staticmethod
-    def _pick_hub(ligands: Mapping[str, Ligand], feasible: Mapping[tuple[str, str], Transformation]) -> str:
-        """Return the ligand with the lowest summed cost to its feasible partners."""
+    def _pick_hub(
+        ligands: Mapping[str, Ligand],
+        feasible: Mapping[tuple[str, str], Transformation],
+        hub_selection: HubSelection = "most_partners",
+    ) -> str:
+        """Return the hub, by whichever of the two published rules was asked for.
+
+        OpenEye's own documentation concedes that hub choice "is the dominant factor in the
+        performance of a star map", which is why this is a knob rather than a constant.
+
+        Parameters
+        ----------
+        ligands : Mapping[str, Ligand]
+        feasible : Mapping[tuple[str, str], Transformation]
+            The post-ban feasible pool, keyed by unordered pair.
+        hub_selection : {"most_partners", "min_total_cost"}, optional
+            ``"most_partners"`` is the historical default: partner count first, cost only
+            as a tie-break. More partners beats a lower mean, because a hub reachable from
+            only two ligands is no hub at all however cheap those two edges are -- but the
+            consequence is that cost is never compared across ligands of differing
+            connectivity, so the cheapest well-connected hub can lose to a slightly
+            better-connected expensive one.
+
+            ``"min_total_cost"`` is LOMAP's ``pick_lead`` and HiMap's ``ref_lig_gen``:
+            lowest summed cost to the partners a ligand actually has, which is the same
+            thing as highest summed similarity. Partner count then breaks *its* ties.
+
+        Returns
+        -------
+        str
+
+        Notes
+        -----
+        Under ``"min_total_cost"`` a ligand with no feasible partner sums to zero and would
+        otherwise win outright, so it is ranked at infinity instead. A hub with no spokes is
+        not a cheap hub; it is not a hub.
+        """
         totals: dict[str, float] = {name: 0.0 for name in ligands}
         counts: dict[str, int] = {name: 0 for name in ligands}
         for (a, b), edge in feasible.items():
             for name in (a, b):
                 totals[name] += edge.score.total
                 counts[name] += 1
-        # More partners beats a lower mean: a hub reachable from only two ligands is no
-        # hub at all, however cheap those two edges are.
+        if hub_selection == "min_total_cost":
+            return min(ligands, key=lambda n: (totals[n] if counts[n] else math.inf, -counts[n], n))
         return min(ligands, key=lambda n: (-counts[n], totals[n], n))
 
 

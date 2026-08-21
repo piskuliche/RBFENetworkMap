@@ -3,8 +3,8 @@
 Selection proceeds in two stages, and the order is what makes the connectivity guarantee
 hold. First a minimum spanning tree, seeded so that forced edges are already in it, which
 spans every ligand whenever the feasible candidate graph is connected. Then a purely
-*additive* redundancy pass that raises degrees and closes cycles without ever removing a
-tree edge.
+*additive* redundancy pass that raises degrees, closes cycles, and -- when ``max_diameter``
+is set -- buys shortcuts, without ever removing a tree edge.
 
 Because the second stage only adds, connectivity established in the first stage cannot be
 lost. That is also why an ``n_edges`` smaller than ``n_ligands - 1`` is rejected up front
@@ -44,7 +44,11 @@ from rbfenetmap.core.meta.planners import AbstractNetworkPlanner
 from rbfenetmap.core.models import EDGE_SEPARATOR, EdgeKind, Ligand, Network, Transformation
 from rbfenetmap.core.options import CBFEMode, NetworkOptions
 
-__all__ = ("MSTRedundancyPlanner",)
+__all__ = ("MSTRedundancyPlanner", "RedundantMSTPlanner")
+
+#: Guards the cost divisor in the diameter pass. A forced or hub-seeded edge can carry a
+#: cost of exactly zero, and "reduction per unit cost" has to stay finite for it.
+_COST_FLOOR = 1e-9
 
 
 def _best_by_pair(candidates: Sequence[Transformation]) -> dict[tuple[str, str], Transformation]:
@@ -367,6 +371,12 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
             if options.min_cycle_coverage > 0:
                 selected = self._close_cycles(graph, available, selected, options, unmet)
 
+        # Third and last, because a diameter bound is a statement about the network the
+        # other two passes have already produced. Running it earlier would buy shortcuts
+        # across a topology that degree raising and cycle closure then shorten anyway.
+        if options.max_diameter is not None:
+            selected = self._reduce_diameter(graph, degree_available, selected, options, unmet)
+
         return selected
 
     def _raise_degrees(
@@ -413,6 +423,118 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
             warnings.warn(message, stacklevel=3)
         return selected
 
+    def _reduce_diameter(
+        self,
+        graph: nx.Graph,
+        available: Sequence[tuple[str, str]],
+        selected: set[tuple[str, str]],
+        options: NetworkOptions,
+        unmet: list[str],
+    ) -> set[tuple[str, str]]:
+        """Buy shortcut edges until the network's diameter meets ``max_diameter``.
+
+        Statistical error accumulates along a path, so a network two ligands can only be
+        compared across in nine hops is worse than its edge count suggests. LOMAP caps the
+        diameter at 6 and FEP+ below 5.
+
+        Both of those enforce the bound during edge *removal*, where the question is which
+        edge to keep. Selection here is additive -- the spanning tree is never trimmed, and
+        that is what makes the connectivity guarantee hold -- so the bound is approached
+        from the other side, by adding the shortcut that shortens the network most per unit
+        of cost, and repeating.
+
+        Best-effort, tier 5 alongside ``edges_per_ligand`` and ``min_cycle_coverage``: a
+        pool with no shortcut left to sell warns and records the shortfall. It never raises,
+        because a network that is merely longer than asked for is still a usable network,
+        unlike one that fails a hard budget conflict.
+
+        Parameters
+        ----------
+        graph : networkx.Graph
+            The candidate graph, carrying ``weight`` per edge.
+        available : Sequence[tuple[str, str]]
+            Cost-ordered unselected pairs. The caller passes the *RBFE-only* pool, on the
+            same reasoning that keeps degree raising off CBFE edges: shortening a path that
+            already exists is a refinement, not a rescue, and two absolute calculations is
+            not a trade anyone would make for one.
+        selected : set[tuple[str, str]]
+        options : NetworkOptions
+        unmet : list[str]
+            Appended to in place when the target cannot be met.
+
+        Returns
+        -------
+        set[tuple[str, str]]
+            *selected* plus whatever shortcuts were bought.
+
+        Notes
+        -----
+        :func:`networkx.diameter` is called with ``usebounds=True`` throughout. The bounded
+        form (the FastLomap optimisation, arXiv:2304.04713) prunes the all-pairs sweep to a
+        handful of BFS runs, which is what makes a per-candidate re-evaluation affordable
+        past a hundred ligands.
+        """
+        selected = set(selected)
+        target = options.max_diameter
+        if target is None:  # pragma: no cover - the caller only enters this pass when it is set
+            return selected
+
+        def diameter_of(current: set[tuple[str, str]]) -> int | None:
+            """Diameter of the selected subgraph, or ``None`` if it is disconnected."""
+            subgraph: nx.Graph = nx.Graph()
+            subgraph.add_nodes_from(graph.nodes)
+            subgraph.add_edges_from(current)
+            if subgraph.number_of_nodes() < 2:
+                return 0
+            if not nx.is_connected(subgraph):
+                return None
+            return int(nx.diameter(subgraph, usebounds=True))
+
+        current = diameter_of(selected)
+        if current is None:
+            # Diameter is undefined across components. Reporting that plainly beats
+            # reporting an unmet bound, which would send the reader after the wrong knob:
+            # the network is disconnected, which is the larger problem.
+            unmet.append(
+                f"max_diameter={target} not evaluated: the selected network is disconnected, so its "
+                "diameter is undefined. Connect it first."
+            )
+            return selected
+
+        while current > target:
+            if options.n_edges is not None and len(selected) >= options.n_edges:
+                break
+            best: tuple[float, int, float, tuple[str, str]] | None = None
+            for pair in available:
+                if pair in selected:
+                    continue
+                reduced = diameter_of(selected | {pair})
+                if reduced is None or reduced >= current:
+                    continue
+                cost = float(graph.edges[pair]["weight"])
+                reduction = current - reduced
+                # Reduction per unit cost first, then raw reduction, then price. Ranking on
+                # raw reduction alone would happily pay a rescue-priced edge to save the
+                # same hop a cheap one saves.
+                key = (-reduction / max(cost, _COST_FLOOR), -reduction, cost, pair)
+                if best is None or key < best:
+                    best = key
+            if best is None:
+                break
+            selected.add(best[-1])
+            current = diameter_of(selected)
+            if current is None:  # pragma: no cover - adding an edge cannot disconnect
+                break
+
+        if current is not None and current > target:
+            message = (
+                f"max_diameter={target} unmet; achieved {current}. The candidate pool has no "
+                "further edge that would shorten the network."
+            )
+            unmet.append(message)
+            warnings.warn(message, stacklevel=4)
+        return selected
+
     def _close_cycles(
         self,
         graph: nx.Graph,
@@ -421,20 +543,37 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
         options: NetworkOptions,
         unmet: list[str],
     ) -> set[tuple[str, str]]:
-        """Add cheap edges until enough ligands lie on a cycle.
+        """Add cheap edges until enough of the network lies on a cycle.
 
         *available* is the cost-ordered pool of unselected pairs, computed once by the
         caller. It includes CBFE edges when ``cbfe_mode`` allows cycle closure to use them.
+
+        ``cycle_coverage_mode`` chooses what "enough" is measured over. The node form is
+        LOMAP's: the fraction of *ligands* on at least one cycle. The edge form is FEP+'s:
+        the fraction of *selected edges* on one, which is the complement of the bridge set
+        and therefore exactly 2-edge-connectivity at coverage 1.0.
+
+        The edge form is strictly harder, which is why it is opt-in. A bridge hanging off a
+        cycle has both endpoints covered under the node rule while the edge itself is
+        checked by nothing -- and it is the edge that carries the free energy.
+
+        Note that the edge denominator *moves*: each added edge is one more edge that must
+        itself end up on a cycle. That is the intended reading rather than an oversight, so
+        the ratio is recomputed each pass instead of being fixed once like the node target.
         """
         selected = set(selected)
 
-        def covered(current: set[tuple[str, str]]) -> set[str]:
-            """Nodes belonging to a biconnected component with at least two edges."""
+        def _subgraph(current: set[tuple[str, str]]) -> nx.Graph:
+            """Scratch graph over every ligand carrying only the currently selected edges."""
             subgraph: nx.Graph = nx.Graph()
             subgraph.add_nodes_from(graph.nodes)
             subgraph.add_edges_from(current)
+            return subgraph
+
+        def covered_nodes(current: set[tuple[str, str]]) -> set[str]:
+            """Nodes belonging to a biconnected component with at least two edges."""
             nodes: set[str] = set()
-            for component in nx.biconnected_component_edges(subgraph):
+            for component in nx.biconnected_component_edges(_subgraph(current)):
                 edges = list(component)
                 if len(edges) >= 2:
                     for u, v in edges:
@@ -442,11 +581,35 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
                         nodes.add(v)
             return nodes
 
+        def covered_edges(current: set[tuple[str, str]]) -> set[tuple[str, str]]:
+            """Selected edges that are not bridges, i.e. that lie on at least one cycle."""
+            bridges = {tuple(sorted(pair)) for pair in nx.bridges(_subgraph(current))}
+            return {pair for pair in current if pair not in bridges}
+
+        edge_mode = options.cycle_coverage_mode == "edge"
+        covered = covered_edges if edge_mode else covered_nodes
+
         total = graph.number_of_nodes()
         if total < 3:
             return selected  # a cycle needs three vertices
 
         target = options.min_cycle_coverage * total
+
+        def below_target(current: set[tuple[str, str]]) -> bool:
+            """Whether *current* still falls short of the requested coverage.
+
+            The node branch keeps the original comparison verbatim rather than routing
+            through a fraction, so adding the edge mode cannot perturb a single node-mode
+            selection by a floating-point hair.
+            """
+            if edge_mode:
+                return bool(current) and len(covered_edges(current)) < options.min_cycle_coverage * len(current)
+            return len(covered_nodes(current)) < target
+
+        def achieved_coverage(current: set[tuple[str, str]]) -> float:
+            """The coverage fraction actually reached, in whichever unit the mode counts."""
+            denominator = len(current) if edge_mode else total
+            return len(covered(current)) / denominator if denominator else 1.0
 
         def cycle_size_if_added(current: set[tuple[str, str]], pair: tuple[str, str]) -> int | None:
             """Return the cycle length created by adding *pair*, or ``None`` if none."""
@@ -482,10 +645,14 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
             is_cbfe = float(graph.edges[pair]["kind"] == EdgeKind.CBFE.value)
             return (-gained, is_cbfe, cycle_size, graph.edges[pair]["weight"], pair)
 
-        while len(covered(selected)) < target:
+        while below_target(selected):
             if options.n_edges is not None and len(selected) >= options.n_edges:
                 break
             current_covered = covered(selected)
+            # The CBFE restriction below is about *ligands* with no other route onto a
+            # cycle, so it reads node coverage in both modes. Under the edge mode
+            # ``current_covered`` holds edges and would silently never match a name.
+            covered_names = covered_nodes(selected) if edge_mode else current_covered
             # A CBFE edge is only worth spending on a ligand that has no other route onto a
             # cycle, so restrict that half of the pool to pairs with an uncovered endpoint.
             # This is the intent stated directly, and it also keeps `rank` -- which builds
@@ -496,8 +663,8 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
                 if pair not in selected
                 and (
                     graph.edges[pair]["kind"] != EdgeKind.CBFE.value
-                    or pair[0] not in current_covered
-                    or pair[1] not in current_covered
+                    or pair[0] not in covered_names
+                    or pair[1] not in covered_names
                 )
             ]
             ranked = [item for item in (rank(pair, current_covered) for pair in considered) if item is not None]
@@ -506,12 +673,62 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
                 break
             selected.add(chosen)
 
-        achieved = len(covered(selected)) / total if total else 1.0
+        achieved = achieved_coverage(selected)
         if achieved < options.min_cycle_coverage:
+            # The node wording is left exactly as it was: it is the default, it lands on
+            # ``unmet_constraints``, and that string is part of the golden fingerprint.
+            unit = " (edge coverage)" if edge_mode else ""
             message = (
-                f"min_cycle_coverage={options.min_cycle_coverage:.2f} unmet; achieved {achieved:.2f}. "
+                f"min_cycle_coverage={options.min_cycle_coverage:.2f}{unit} unmet; achieved {achieved:.2f}. "
                 "The candidate pool has no further edges that would improve cycle coverage."
             )
             unmet.append(message)
             warnings.warn(message, stacklevel=4)
+        return selected
+
+
+class RedundantMSTPlanner(MSTRedundancyPlanner):
+    """Overlay ``n_redundancy`` spanning trees, then add the usual redundancy.
+
+    A distinct topology from MST-plus-greedy-redundancy, and one that is separately
+    benchmarked: Konnektor builds its default network this way with two trees, and the
+    paper that introduced it uses three. Running Kruskal, deleting the edges it chose, and
+    running it again yields a second-cheapest spanning structure that shares no edge with
+    the first, so every ligand has two independent routes into the network rather than a
+    tree plus whatever the greedy degree pass happened to find cheap.
+
+    The difference is what fails when an edge fails. Under the greedy pass a ligand's
+    second edge may well be its first edge's neighbour; under overlaid trees it is, by
+    construction, part of a structure that spans without the first tree at all.
+
+    Everything else -- the CBFE ordering, the redundancy passes, the connectivity
+    guarantee -- is inherited unchanged. Only :meth:`_spanning_edges` differs, and it only
+    ever adds, so the guarantee still holds.
+    """
+
+    name: ClassVar[str] = "redundant-mst"
+    supports_cbfe: ClassVar[bool] = True
+
+    def _spanning_edges(self, graph: nx.Graph, options: NetworkOptions) -> set[tuple[str, str]]:
+        """Run Kruskal ``n_redundancy`` times, removing each pass's edges before the next.
+
+        Later passes see a thinner graph and will usually return a spanning *forest* rather
+        than a tree -- once the cheapest tree is gone, some ligands may have no edge left.
+        That is fine and deliberate: the union still spans, because the first pass did, and
+        every pass after it is pure addition.
+
+        Forced pairs and any hub star are pre-seeded by the inherited implementation on the
+        first pass only. They are gone from the working copy afterwards, so a later pass
+        cannot select them twice.
+        """
+        selected: set[tuple[str, str]] = set()
+        working: nx.Graph = graph.copy()
+        for _ in range(options.n_redundancy):
+            if working.number_of_edges() == 0:
+                break
+            pass_edges = super()._spanning_edges(working, options)
+            if not pass_edges:
+                break
+            selected |= pass_edges
+            working.remove_edges_from(pass_edges)
         return selected

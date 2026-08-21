@@ -23,6 +23,7 @@ _KIND = "planner"
 
 _MODULE_MAP = {
     "MSTRedundancyPlanner": "rbfenetmap.plugins.planners.mst_planner",
+    "RedundantMSTPlanner": "rbfenetmap.plugins.planners.mst_planner",
     "StarPlanner": "rbfenetmap.plugins.planners.simple_planners",
     "ExplicitPlanner": "rbfenetmap.plugins.planners.simple_planners",
     "CompletePlanner": "rbfenetmap.plugins.planners.simple_planners",
@@ -34,6 +35,13 @@ BUILTIN_PLANNERS: dict[str, PluginSpec] = {
         kind=_KIND,
         target="rbfenetmap.plugins.planners.mst_planner:MSTRedundancyPlanner",
         description="Minimum spanning tree plus degree and cycle-closure redundancy.",
+        requires=("networkx",),
+    ),
+    "redundant-mst": PluginSpec(
+        name="redundant-mst",
+        kind=_KIND,
+        target="rbfenetmap.plugins.planners.mst_planner:RedundantMSTPlanner",
+        description="Overlay n_redundancy spanning trees, then the usual degree and cycle redundancy.",
         requires=("networkx",),
     ),
     "star": PluginSpec(

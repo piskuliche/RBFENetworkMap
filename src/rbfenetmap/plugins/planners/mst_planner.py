@@ -41,7 +41,7 @@ import networkx as nx
 from rbfenetmap.core.cbfe import build_cbfe_pool, make_cbfe_transformation, select_cbfe_bridges
 from rbfenetmap.core.exceptions import NetworkPlanError
 from rbfenetmap.core.meta.planners import AbstractNetworkPlanner
-from rbfenetmap.core.models import EDGE_SEPARATOR, EdgeKind, Ligand, Network, Transformation
+from rbfenetmap.core.models import EDGE_SEPARATOR, EdgeKind, Ligand, Network, Transformation, orient_edge
 from rbfenetmap.core.options import CBFEMode, NetworkOptions
 
 __all__ = ("MSTRedundancyPlanner",)
@@ -58,24 +58,6 @@ def _best_by_pair(candidates: Sequence[Transformation]) -> dict[tuple[str, str],
         if incumbent is None or candidate.score.total < incumbent.score.total:
             best[key] = candidate
     return best
-
-
-def _orient(edge: Transformation, ligands: Mapping[str, Ligand], direction: str) -> Transformation:
-    """Return *edge* oriented per *direction*.
-
-    For a CBFE edge every atom is soft-core, so ``fewer_softcore_first`` degenerates to
-    "smaller ligand first". That is still the convention one wants -- the source is the
-    molecule being decoupled from the site -- but it is arrived at by a different route
-    than the rationale below describes, which is worth knowing before touching this.
-    """
-    if direction == "lexicographic":
-        return edge if edge.source < edge.target else edge.reversed()
-    if direction == "heavier_second":
-        source, target = ligands[edge.source], ligands[edge.target]
-        return edge if source.n_heavy <= target.n_heavy else edge.reversed()
-    # "fewer_softcore_first": start from the side that has less to grow, so the
-    # transformation builds outward into the larger ligand.
-    return edge if edge.mapping.n_softcore_1 <= edge.mapping.n_softcore_2 else edge.reversed()
 
 
 def _charge_classes(ligands: Mapping[str, Ligand]) -> dict[int, list[str]]:
@@ -236,7 +218,7 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
                 return edge
             return make_cbfe_transformation(ligands[pair[0]], ligands[pair[1]], options)
 
-        edges = tuple(_orient(chosen(pair), ligands, options.edge_direction) for pair in sorted(selected))
+        edges = tuple(orient_edge(chosen(pair), ligands, options.edge_direction) for pair in sorted(selected))
         network = Network(
             ligands=ligands,
             edges=edges,

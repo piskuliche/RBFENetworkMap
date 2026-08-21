@@ -39,6 +39,7 @@ __all__ = (
     "SoftcoreRepair",
     "Transformation",
     "edge_key",
+    "orient_edge",
     "parse_edge_key",
 )
 
@@ -764,3 +765,45 @@ class Network:
         consumer wants one or the other rather than the mixed list.
         """
         return tuple(e for e in self.edges if e.kind is EdgeKind.CBFE)
+
+
+def orient_edge(edge: Transformation, ligands: Mapping[str, Ligand], direction: str) -> Transformation:
+    """Return *edge* oriented according to *direction*.
+
+    Parameters
+    ----------
+    edge : Transformation
+        The selected edge, in whatever orientation selection left it.
+    ligands : Mapping[str, Ligand]
+        Must contain both endpoints; consulted only by ``"heavier_second"``.
+    direction : str
+        A :data:`~rbfenetmap.core.options.EdgeDirection` value.
+
+    Returns
+    -------
+    Transformation
+
+    Notes
+    -----
+    Orientation is applied once, after selection, because selection itself is undirected:
+    the free energy of a transformation is antisymmetric, so ``a -> b`` and ``b -> a`` are
+    the same experiment. Direction only starts to matter when files are written and
+    ``timask``/``scmask`` are assigned.
+
+    ``"fewer_softcore_first"`` starts from the side that has less to grow, so the
+    transformation builds outward into the larger ligand. For a CBFE edge every atom is
+    soft-core, so that rule degenerates to "smaller ligand first". That is still the
+    convention one wants -- the source is the molecule being decoupled from the site -- but
+    it is arrived at by a different route than the rationale above describes, which is
+    worth knowing before touching this.
+
+    This lives in the data model rather than in the planner because it is a property of an
+    edge, not of a selection strategy: post-planning surgery orients the edges it adds by
+    exactly the same rule, and a second copy of it would be free to drift.
+    """
+    if direction == "lexicographic":
+        return edge if edge.source < edge.target else edge.reversed()
+    if direction == "heavier_second":
+        source, target = ligands[edge.source], ligands[edge.target]
+        return edge if source.n_heavy <= target.n_heavy else edge.reversed()
+    return edge if edge.mapping.n_softcore_1 <= edge.mapping.n_softcore_2 else edge.reversed()

@@ -22,3 +22,6 @@ network.json
 network.html
 amber_out/
 unprot_report/
+
+# Machine-local Claude Code settings; .claude/skills/ is shared.
+.claude/settings.local.json

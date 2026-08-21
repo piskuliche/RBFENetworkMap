@@ -97,6 +97,13 @@ COMPAT_CLI_PINS: dict[str, dict[str, Any]] = {
         "cbfe_base_cost": 8.0,
         "cbfe_atom_weight": 0.05,
         "consistency": "pairwise",
+        # statistical design -- v0.4.0 had none, so every one of these pins the no-op
+        "design": "none",
+        "design_candidate_factor": 3.0,
+        "design_refine": False,
+        "design_total_ns": None,
+        "design_lambda_min": 12,
+        "design_lambda_max": 24,
     }
 }
 
@@ -497,6 +504,58 @@ def add_network_arguments(parser: argparse.ArgumentParser) -> None:
         help="Added to the CBFE base cost per heavy atom, summed over both ligands (default: %(default)s).",
     )
     group.add_argument(
+        "--design",
+        choices=("none", "a_optimal", "d_optimal"),
+        default="none",
+        help=(
+            "Statistical design criterion for the 'optimal' planner (default: %(default)s). "
+            "'a_optimal' minimises the total variance of the estimates; 'd_optimal' minimises the "
+            "volume of their joint confidence ellipsoid and yields a markedly more cyclic network at "
+            "the same edge count -- prefer it when a cycle-closure correction will be applied "
+            "downstream. Requires --planner optimal; naming it with any other planner is refused "
+            "rather than ignored."
+        ),
+    )
+    group.add_argument(
+        "--design-candidate-factor",
+        type=float,
+        default=3.0,
+        metavar="F",
+        help="Cap the design's candidate pool at F x the ligand count (default: %(default)s).",
+    )
+    group.add_argument(
+        "--design-refine",
+        action="store_true",
+        help=(
+            "Refine the design with a Fedorov exchange pass. Off by default: the heuristic is already "
+            "within a published 1.10x of the optimum, and this costs far more criterion evaluations."
+        ),
+    )
+    group.add_argument(
+        "--design-total-ns",
+        type=float,
+        metavar="NS",
+        help=(
+            "Total simulation budget, in nanoseconds, distributed A-optimally across the selected "
+            "edges and written into each Amber .runconfig as a lambda-window and nanosecond budget. "
+            "Static: computed from predicted variances, never refitted against measured ones."
+        ),
+    )
+    group.add_argument(
+        "--design-lambda-min",
+        type=int,
+        default=12,
+        metavar="N",
+        help="Fewest lambda windows the allocation may assign to an edge (default: %(default)s).",
+    )
+    group.add_argument(
+        "--design-lambda-max",
+        type=int,
+        default=24,
+        metavar="N",
+        help="Most lambda windows the allocation may assign to an edge (default: %(default)s).",
+    )
+    group.add_argument(
         "--progress",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -579,6 +638,12 @@ def build_network_options(args: argparse.Namespace) -> NetworkOptions:
         cbfe_mode=args.cbfe,
         cbfe_base_cost=args.cbfe_base_cost,
         cbfe_atom_weight=args.cbfe_atom_weight,
+        design=args.design,
+        design_candidate_factor=args.design_candidate_factor,
+        design_refine=args.design_refine,
+        design_total_ns=args.design_total_ns,
+        design_lambda_min=args.design_lambda_min,
+        design_lambda_max=args.design_lambda_max,
         softcore=softcore,
         compat=getattr(args, "compat", None),
     )

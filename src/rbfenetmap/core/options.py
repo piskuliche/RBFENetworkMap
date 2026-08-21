@@ -14,7 +14,9 @@ from rbfenetmap.core.models import EDGE_SEPARATOR, parse_edge_key
 
 __all__ = (
     "COMPAT_LEVELS",
+    "DESIGN_CRITERIA",
     "AlignmentMethod",
+    "DesignCriterion",
     "AlignmentOptions",
     "CBFEMode",
     "CompatLevel",
@@ -39,7 +41,14 @@ EdgeDirection = Literal["fewer_softcore_first", "lexicographic", "heavier_second
 SelectionObjective = Literal["uniform_redundancy", "connectivity_then_cycles"]
 PairEvaluation = Literal["eager", "adaptive"]
 CBFEMode = Literal["off", "bridge", "cycles", "all"]
+DesignCriterion = Literal["none", "a_optimal", "d_optimal"]
 CompatLevel = Literal["v0.4"]
+
+#: Statistical design criteria, plus the ``"none"`` that means "select on cost alone".
+#: ``"none"`` is a member rather than an ``Optional`` because every other selection knob in
+#: this class spells "off" as a value, and one knob that spells it as ``None`` would be a
+#: second convention for the same idea.
+DESIGN_CRITERIA: tuple[DesignCriterion, ...] = ("none", "a_optimal", "d_optimal")
 
 #: Released behaviours a run can be pinned to. Versioned rather than a single ``legacy``
 #: flag: "legacy" stops meaning anything the moment there are two of them, and the whole
@@ -369,6 +378,40 @@ class NetworkOptions:
         Added to ``cbfe_base_cost`` for each heavy atom summed over both ligands. A
         counterpoised calculation decouples both molecules in full, so its expense scales
         with how much there is to decouple.
+    design : {"none", "a_optimal", "d_optimal"}
+        Statistical design criterion the ``optimal`` planner minimises. ``"none"``
+        (default) selects on cost alone, which is what every release up to v0.4 did.
+
+        The criterion is evaluated on the network's Fisher information matrix, which for a
+        set of relative measurements *is* the weighted graph Laplacian -- see
+        :mod:`rbfenetmap.core.design`. ``a_optimal`` minimises the summed variance of the
+        estimates; ``d_optimal`` minimises the volume of their joint confidence ellipsoid,
+        which because the Laplacian's pseudo-determinant counts spanning trees produces a
+        markedly more cyclic network at the same edge count. Prefer ``d_optimal`` when a
+        cycle-closure correction will be applied downstream, ``a_optimal`` otherwise.
+
+        This is an *objective*, so it is meaningful only to a planner that optimises it.
+        Naming it alongside a planner that does not is refused rather than ignored; see
+        :meth:`~rbfenetmap.core.meta.planners.AbstractNetworkPlanner.check_design_support`.
+    design_candidate_factor : float
+        The design's candidate pool is capped at ``design_candidate_factor * n_ligands``
+        edges -- the ``M = 3m`` of Xu's Appendix-H heuristic. Raising it widens the search
+        at quadratic cost in criterion evaluations; the published 1.10x bound is measured at
+        the default of 3.0.
+    design_refine : bool
+        Run a Fedorov exchange pass after the heuristic, swapping edges one at a time while
+        the criterion improves. Off by default: the heuristic is already within a published
+        1.10x of the optimum and the refinement costs far more criterion evaluations.
+    design_total_ns : float, optional
+        Total simulation budget, in nanoseconds, to distribute A-optimally across the
+        selected edges. ``None`` (default) emits no allocation at all. Set it and the Amber
+        exporter writes a per-edge lambda-window and nanosecond budget into each
+        ``.runconfig``. **Static, computed once from the predicted variances** -- the
+        iterative refit against measured variances needs a round trip through the MD engine
+        and is not part of this.
+    design_lambda_min, design_lambda_max : int
+        Bounds on the per-edge lambda-window count the allocation is mapped onto. The
+        defaults, 12 and 24, bracket what an Amber RBFE edge normally runs at.
     softcore : SoftcorePolicy
         Feasibility policy handed to the repair.
     compat : str, optional
@@ -408,6 +451,12 @@ class NetworkOptions:
     cbfe_mode: CBFEMode = "off"
     cbfe_base_cost: float = 8.0
     cbfe_atom_weight: float = 0.05
+    design: DesignCriterion = "none"
+    design_candidate_factor: float = 3.0
+    design_refine: bool = False
+    design_total_ns: float | None = None
+    design_lambda_min: int = 12
+    design_lambda_max: int = 24
     softcore: SoftcorePolicy = field(default_factory=SoftcorePolicy)
     compat: str | None = None
 
@@ -445,6 +494,21 @@ class NetworkOptions:
             raise ValueError("cbfe_base_cost must not be negative.")
         if self.cbfe_atom_weight < 0:
             raise ValueError("cbfe_atom_weight must not be negative.")
+        if self.design not in DESIGN_CRITERIA:
+            raise ValueError(f"design must be one of {list(DESIGN_CRITERIA)}; got {self.design!r}.")
+        if self.design_candidate_factor < 1.0:
+            raise ValueError(
+                "design_candidate_factor must be at least 1.0; a pool smaller than the ligand count "
+                "cannot even hold a spanning tree."
+            )
+        if self.design_total_ns is not None and not self.design_total_ns > 0:
+            raise ValueError("design_total_ns must be positive when set.")
+        if self.design_lambda_min < 2:
+            raise ValueError("design_lambda_min must be at least 2; a lambda schedule needs two end states.")
+        if self.design_lambda_max < self.design_lambda_min:
+            raise ValueError(
+                f"design_lambda_max={self.design_lambda_max} is below design_lambda_min={self.design_lambda_min}."
+            )
         if self.compat is not None and self.compat not in COMPAT_LEVELS:
             raise ValueError(f"Unknown compat level {self.compat!r}. Known: {list(COMPAT_LEVELS)}.")
         if self.pair_strategy == "star" and not self.hub:
@@ -513,6 +577,16 @@ class NetworkOptions:
             "cbfe_mode": "off",
             "cbfe_base_cost": 8.0,
             "cbfe_atom_weight": 0.05,
+            # v0.4.0 had no statistical design at all, so the pin is the no-op. It must
+            # stay "none" even if a later release makes a criterion the default -- that is
+            # the whole contract, and this is the knob most likely to test it, since the
+            # design planner is also where an n_edges default of round(n ln n) would land.
+            "design": "none",
+            "design_candidate_factor": 3.0,
+            "design_refine": False,
+            "design_total_ns": None,
+            "design_lambda_min": 12,
+            "design_lambda_max": 24,
             "softcore": SoftcorePolicy(
                 ring_policy="ring_system",
                 max_softcore_atoms=12,

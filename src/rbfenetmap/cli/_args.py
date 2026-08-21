@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
+from rbfenetmap.core.intermediates import IntermediateOptions
 from rbfenetmap.core.options import (
     COMPAT_LEVELS,
     AlignmentOptions,
@@ -96,6 +97,18 @@ COMPAT_CLI_PINS: dict[str, dict[str, Any]] = {
         "cbfe": "off",
         "cbfe_base_cost": 8.0,
         "cbfe_atom_weight": 0.05,
+        # v0.4 could not invent a ligand, so every one of these pins to "do not". They are
+        # pinned rather than omitted because they are algorithmic: leaving them out would
+        # let `--compat v0.4 --intermediates bridge` quietly plan a network v0.4 could not
+        # have produced, which is the exact surprise --compat exists to prevent.
+        "intermediates": "off",
+        "intermediate_generator": "fragment-swap",
+        "max_intermediates": None,
+        "max_intermediate_gaps": None,
+        "intermediates_per_gap": 4,
+        "intermediate_seed": 0xF00D,
+        "intermediate_pose_attempts": 10,
+        "intermediate_pose_rmsd_factor": 0.5,
         "consistency": "pairwise",
     }
 }
@@ -110,6 +123,7 @@ _DEST_TO_FLAG: dict[str, str] = {
     "allow_disconnected": "--allow-disconnected",
     "weights": "--weights",
     "weights_file": "--weights-file",
+    "intermediates": "--intermediates",
 }
 
 
@@ -497,6 +511,68 @@ def add_network_arguments(parser: argparse.ArgumentParser) -> None:
         help="Added to the CBFE base cost per heavy atom, summed over both ligands (default: %(default)s).",
     )
     group.add_argument(
+        "--intermediates",
+        choices=("off", "bridge", "gaps"),
+        default="off",
+        help=(
+            "Invent bridging ligands for pairs no mapping can relate: 'bridge' only for pairs whose "
+            "endpoints fall in different components of the feasible pool, 'gaps' also for infeasible "
+            "pairs inside a component. The invented molecules are posed against their parents and their "
+            "sub-edges go through the same feasibility checks as any other edge; a proposal whose "
+            "sub-edges do not survive is dropped whole. Default: %(default)s."
+        ),
+    )
+    group.add_argument(
+        "--intermediate-generator",
+        default="fragment-swap",
+        metavar="NAME",
+        help="Intermediate generator plugin (default: %(default)s). Constructed only when --intermediates is on.",
+    )
+    group.add_argument(
+        "--max-intermediates",
+        type=int,
+        metavar="N",
+        help="Cap on how many ligands one run may invent in total (default: no cap beyond the edge budget).",
+    )
+    group.add_argument(
+        "--max-intermediate-gaps",
+        type=int,
+        metavar="N",
+        help="Offer at most N gaps to the generator, most similar first (default: every gap).",
+    )
+    group.add_argument(
+        "--intermediates-per-gap",
+        type=int,
+        default=4,
+        metavar="N",
+        help="Cap on molecules proposed for one gap (default: %(default)s).",
+    )
+    group.add_argument(
+        "--intermediate-seed",
+        type=int,
+        default=0xF00D,
+        metavar="SEED",
+        help="Base RDKit seed for posing invented molecules (default: %(default)s).",
+    )
+    group.add_argument(
+        "--intermediate-pose-attempts",
+        type=int,
+        default=10,
+        metavar="N",
+        help="Embedding attempts spent posing one invented molecule (default: %(default)s).",
+    )
+    group.add_argument(
+        "--intermediate-pose-rmsd-factor",
+        type=float,
+        default=0.5,
+        metavar="F",
+        help=(
+            "Accept an invented pose only below F * --core-rmsd-threshold (default: %(default)s). The "
+            "sub-edges are gated on the full threshold anyway; this refuses a pose that would only just "
+            "scrape through."
+        ),
+    )
+    group.add_argument(
         "--progress",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -554,6 +630,16 @@ def build_network_options(args: argparse.Namespace) -> NetworkOptions:
         core_rmsd_threshold=args.core_rmsd_threshold,
         charge_change_policy=args.charge_change_policy,
     )
+    intermediates = IntermediateOptions(
+        mode=args.intermediates,
+        generator=args.intermediate_generator,
+        max_intermediates=args.max_intermediates,
+        max_gaps=args.max_intermediate_gaps,
+        max_molecules=args.intermediates_per_gap,
+        seed=args.intermediate_seed,
+        max_pose_attempts=args.intermediate_pose_attempts,
+        pose_rmsd_factor=args.intermediate_pose_rmsd_factor,
+    )
     return NetworkOptions(
         pair_strategy=args.pair_strategy,
         hub=args.hub,
@@ -580,5 +666,6 @@ def build_network_options(args: argparse.Namespace) -> NetworkOptions:
         cbfe_base_cost=args.cbfe_base_cost,
         cbfe_atom_weight=args.cbfe_atom_weight,
         softcore=softcore,
+        intermediates=intermediates,
         compat=getattr(args, "compat", None),
     )

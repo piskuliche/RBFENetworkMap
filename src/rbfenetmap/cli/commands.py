@@ -254,6 +254,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
     summary = f"Planned {len(network.edges)} edge(s) over {len(network.ligands)} ligand(s) -> {out}"
     if network.cbfe_edges:
         summary += f"\n  {len(network.rbfe_edges)} RBFE, {len(network.cbfe_edges)} CBFE"
+    if network.synthetic_ligands:
+        # Named, not counted. An invented vertex is a molecule the user must parameterise
+        # and simulate, so "3 intermediates" is not something anyone can act on.
+        invented = ", ".join(ligand.name for ligand in network.synthetic_ligands)
+        summary += f"\n  {len(network.synthetic_ligands)} invented ligand(s): {invented}"
     print(summary)
     rows = [
         [

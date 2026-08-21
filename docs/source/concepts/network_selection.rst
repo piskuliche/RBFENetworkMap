@@ -174,6 +174,70 @@ network is two ``BuildEdges`` runs, and the layout mirrors that. Each carries an
 amberstudio builds its masks from the residue roles, since there is no mapping to convey --
 so ``cbfe/`` holds only the edge list. An all-RBFE network keeps the historical flat layout.
 
+Reproducing a released behaviour
+--------------------------------
+
+Every knob added after v0.4.0 defaults to what v0.4.0 did, so an existing command keeps
+planning the network it always planned. That is a promise about *defaults*, and defaults
+move: a later release may well decide that ``n_edges`` should follow ``n ln n``, or that
+cycle coverage should be measured over edges rather than nodes. When that happens, every
+network planned before it becomes irreproducible unless the old behaviour is still
+reachable by name.
+
+``--compat`` is that name::
+
+   rbfenet plan --ligands ligands.sdf --compat v0.4 --out network.json
+
+It pins every algorithmic knob -- mapper, scorer, soft-core policy, planner, and the whole
+of selection -- to the values the named release used. Those values are written out
+literally in :data:`rbfenetmap.cli._args.COMPAT_CLI_PINS` and in
+:meth:`rbfenetmap.core.options.NetworkOptions.preset`, rather than being read back from the
+current defaults. That is the entire mechanism: a table derived from the defaults would
+move when they moved and would silently stop reproducing the version it names.
+
+Versioned, not a boolean
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+There is deliberately no ``--legacy``. A boolean stops meaning anything the moment there
+are two past behaviours to choose between, and the flag has to keep being unambiguous
+several releases from now.
+
+What is pinned, and what is not
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Pinned: the *algorithmic* surface -- the knobs whose meaning or default may change between
+releases.
+
+Not pinned, and usable alongside it:
+
+- **ligand intent** -- ``--hub``, ``--forced-edge``, ``--banned-edge``, ``--explicit-edge``.
+  Banning an edge is a statement about one ligand set, not about a version's behaviour.
+- **input preparation** -- ``--ligands``, ``--align`` and friends. That is which molecules
+  go in, not how they are planned.
+- **operational flags** -- ``--jobs``, ``--progress``, ``--out``, ``--export``. None of
+  them can change which network comes out.
+
+This is what makes the flag practical rather than merely principled: pinning ligand intent
+would leave ``--compat`` unable to plan a real series.
+
+Naming a pinned knob is a contradiction
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``--compat v0.4 --edges-per-ligand 3`` asks for v0.4's behaviour and for something other
+than v0.4's behaviour, so it is refused with the offending flag named. This follows the
+same rule as the ``n_edges`` conflict below: both resolutions are defensible, so neither is
+chosen on the user's behalf.
+
+Naming the knob is the contradiction, not disagreeing with it. ``--compat v0.4
+--edges-per-ligand 2`` is refused too, even though 2 is what v0.4 used. Accepting it
+because it happens to match today would make the rule depend on the current default, so
+the same command would start failing the day that default moved -- which is precisely the
+surprise ``--compat`` exists to prevent.
+
+The level is recorded in the network JSON as ``options.compat``, so a planned network
+states which behaviour produced it. A network planned without the flag writes no such key
+at all, leaving its output byte-for-byte what it was before the flag existed.
+
 Knob precedence
 ---------------
 
@@ -212,6 +276,10 @@ Knob precedence
      - ``cbfe_mode``
      - Widens the pool rather than steering selection. Applied *before* cost competition,
        so it can rescue (3) without ever displacing a feasible RBFE edge.
+
+``--compat`` is not in this table. It is a *constructor*: it writes the values the rest of
+the table then operates on, so it is applied before precedence rather than competing inside
+it.
 
 Why the ``n_edges`` conflict is a hard error
 --------------------------------------------

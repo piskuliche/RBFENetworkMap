@@ -12,9 +12,18 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
-from rbfenetmap.core.options import AlignmentOptions, CorePruningPolicy, MappingOptions, NetworkOptions, SoftcorePolicy
+from rbfenetmap.core.options import (
+    COMPAT_LEVELS,
+    AlignmentOptions,
+    CorePruningPolicy,
+    MappingOptions,
+    NetworkOptions,
+    SoftcorePolicy,
+)
 
 __all__ = (
+    "COMPAT_CLI_PINS",
+    "add_compat_argument",
     "add_ligand_arguments",
     "add_mapping_arguments",
     "add_network_arguments",
@@ -22,8 +31,189 @@ __all__ = (
     "build_alignment_options",
     "build_mapping_options",
     "build_network_options",
+    "explicit_dests",
     "parse_key_values",
+    "resolve_compat",
 )
+
+
+#: What ``--compat LEVEL`` pins, as CLI destination names, per level.
+#:
+#: **These are literal transcriptions of what the named release did, not a view onto the
+#: current defaults.** Deriving them from the parser would be shorter and would defeat the
+#: mechanism entirely: when a later version moves a default, a derived table moves with it
+#: and silently stops reproducing the version it names.
+#:
+#: The pinned surface is the *algorithmic* one -- the knobs whose meaning or default may
+#: change between releases. Deliberately absent are the settings that describe **this run**
+#: rather than **this behaviour**:
+#:
+#: - ligand-specific intent (``hub``, ``forced_edge``, ``banned_edge``, ``explicit_edge``):
+#:   banning an edge is a statement about one ligand set, not about a version;
+#: - input preparation (``ligands``, ``align`` and friends): that is which molecules go in,
+#:   not how they are planned;
+#: - operational knobs (``jobs``, ``progress``, ``out``, ``export``): they cannot change
+#:   which network is produced.
+#:
+#: All three stay usable alongside a compat level, which is what makes it practical rather
+#: than merely principled.
+COMPAT_CLI_PINS: dict[str, dict[str, Any]] = {
+    "v0.4": {
+        # mapping
+        "mapper": "mcss-e2",
+        "match_selection": "fewest_fragments",
+        "mcs_timeout": 60,
+        "distance_threshold": 2.0,
+        "mapper_opt": None,
+        # scoring
+        "scorer": "linear",
+        "weights": None,
+        "weights_file": None,
+        # soft-core feasibility
+        "max_softcore_atoms": 12,
+        "max_softcore_fraction": 0.6,
+        "min_core_atoms": 4,
+        "min_mcs_fraction": 0.35,
+        "core_rmsd_threshold": 2.0,
+        "ring_policy": "ring_system",
+        "charge_change_policy": "penalize",
+        # selection
+        "planner": "mst",
+        "pair_strategy": "all_unordered_pairs",
+        "n_edges": None,
+        "edges_per_ligand": 2,
+        "min_cycle_coverage": 1.0,
+        "allow_disconnected": False,
+        "edge_direction": "fewer_softcore_first",
+        "prefilter": "none",
+        "prefilter_k": 8,
+        "prefilter_min_tanimoto": 0.4,
+        "selection_objective": "uniform_redundancy",
+        "max_cycle_size": None,
+        "pair_evaluation": "eager",
+        "adaptive_initial_neighbors": 3,
+        "adaptive_batch_size": 32,
+        "cbfe": "off",
+        "cbfe_base_cost": 8.0,
+        "cbfe_atom_weight": 0.05,
+        "consistency": "pairwise",
+    }
+}
+
+#: Reverse lookup from destination to the flag that sets it, for error messages. A user
+#: who typed ``--edges-per-ligand`` should be told about ``--edges-per-ligand``, not about
+#: an internal attribute name they have never seen.
+_DEST_TO_FLAG: dict[str, str] = {
+    "mapper_opt": "--mapper-opt",
+    "mcs_timeout": "--mcs-timeout",
+    "cbfe": "--cbfe",
+    "allow_disconnected": "--allow-disconnected",
+    "weights": "--weights",
+    "weights_file": "--weights-file",
+}
+
+
+def _flag_for(dest: str) -> str:
+    """Return the user-facing flag that sets *dest*."""
+    return _DEST_TO_FLAG.get(dest, "--" + dest.replace("_", "-"))
+
+
+def add_compat_argument(parser: argparse.ArgumentParser) -> None:
+    """Add ``--compat``, which pins every algorithmic knob to a released behaviour."""
+    parser.add_argument(
+        "--compat",
+        choices=COMPAT_LEVELS,
+        metavar="LEVEL",
+        help=(
+            "Reproduce a released version's behaviour exactly, pinning every algorithmic "
+            f"knob to what that version used. Choices: {', '.join(COMPAT_LEVELS)}. Ligand "
+            "intent (--hub, --banned-edge), input preparation (--align) and operational "
+            "flags (--jobs, --progress) stay available; naming an algorithmic knob "
+            "alongside this is a contradiction and is refused."
+        ),
+    )
+
+
+def explicit_dests(parser: argparse.ArgumentParser, argv: Sequence[str] | None) -> frozenset[str]:
+    """Return the destinations the user actually named on the command line.
+
+    Comparing the parsed value against the current default cannot answer this, and the
+    difference is the whole reason ``--compat`` exists: once a release moves a default, an
+    unnamed flag and a deliberately-set one become indistinguishable that way, and every
+    run would be reported as conflicting with the level it asked for.
+
+    So this re-parses the same argv against a parser whose defaults are all suppressed.
+    Only what the user typed survives, which is exactly the question being asked.
+
+    Parameters
+    ----------
+    parser : argparse.ArgumentParser
+        **A throwaway.** Its defaults are suppressed in place, which leaves it unfit to
+        parse anything else, so callers pass a freshly built one rather than the parser
+        whose result they intend to use.
+    argv : Sequence[str], optional
+        The same argv the real parse saw. ``None`` means ``sys.argv[1:]``.
+    """
+    _suppress_defaults(parser)
+    try:
+        return frozenset(vars(parser.parse_args(list(argv) if argv is not None else None)))
+    except SystemExit:  # pragma: no cover - argparse already reported the usage error
+        return frozenset()
+
+
+def _suppress_defaults(parser: argparse.ArgumentParser) -> None:
+    """Set every default in *parser*, and in any subparser, to ``SUPPRESS``."""
+    for action in parser._actions:  # noqa: SLF001 - argparse exposes no public equivalent
+        if isinstance(action, argparse._SubParsersAction):  # noqa: SLF001
+            for sub in action.choices.values():
+                _suppress_defaults(sub)
+        action.default = argparse.SUPPRESS
+
+
+def resolve_compat(args: argparse.Namespace, explicit: frozenset[str]) -> None:
+    """Apply ``--compat`` to *args* in place, refusing any knob it contradicts.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed arguments. Modified in place.
+    explicit : frozenset[str]
+        Destinations the user named, from :func:`explicit_dests`.
+
+    Raises
+    ------
+    SystemExit
+        Via ``argparse``-style exit, if the user named an algorithmic knob alongside
+        ``--compat``.
+
+    Notes
+    -----
+    Rejecting rather than silently letting one win follows the rule the package already
+    applies to ``n_edges`` against ``require_connected``: both resolutions are defensible,
+    so neither may be chosen on the user's behalf. ``--compat v0.4 --max-diameter 5`` is a
+    request for v0.4's behaviour and for something v0.4 could not do, and only the user can
+    say which they meant.
+    """
+    level = getattr(args, "compat", None)
+    if level is None:
+        return
+
+    pins = COMPAT_CLI_PINS[level]
+    conflicts = sorted(_flag_for(dest) for dest in pins if dest in explicit)
+    if conflicts:
+        raise ValueError(
+            f"--compat {level} pins every algorithmic knob to what {level} used, so it cannot be "
+            f"combined with {', '.join(conflicts)}. Drop --compat to set "
+            f"{'them' if len(conflicts) > 1 else 'it'} explicitly, or drop "
+            f"{'those flags' if len(conflicts) > 1 else 'that flag'} to reproduce {level}. "
+            "Ligand intent (--hub, --forced-edge, --banned-edge), input preparation "
+            "(--align) and operational flags (--jobs, --progress) are not pinned and may be "
+            "combined with --compat freely."
+        )
+
+    for dest, value in pins.items():
+        if hasattr(args, dest):
+            setattr(args, dest, value)
 
 
 def parse_key_values(items: Sequence[str] | None, *, numeric: bool = True) -> dict[str, Any]:
@@ -197,6 +387,7 @@ def add_softcore_arguments(parser: argparse.ArgumentParser) -> None:
 def add_network_arguments(parser: argparse.ArgumentParser) -> None:
     """Add the network-selection flags."""
     group = parser.add_argument_group("network selection")
+    add_compat_argument(group)  # type: ignore[arg-type]
     group.add_argument("--planner", default="mst", help="Planner plugin (default: %(default)s).")
     group.add_argument(
         "--pair-strategy",
@@ -389,4 +580,5 @@ def build_network_options(args: argparse.Namespace) -> NetworkOptions:
         cbfe_base_cost=args.cbfe_base_cost,
         cbfe_atom_weight=args.cbfe_atom_weight,
         softcore=softcore,
+        compat=getattr(args, "compat", None),
     )

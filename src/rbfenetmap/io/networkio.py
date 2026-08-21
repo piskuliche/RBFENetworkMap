@@ -187,6 +187,11 @@ def network_to_dict(network: Network) -> dict[str, Any]:
                     "core_rmsd_threshold": options.softcore.core_rmsd_threshold,
                     "charge_change_policy": options.softcore.charge_change_policy,
                 },
+                # Omitted entirely when unset, so a network planned without --compat
+                # serializes byte-for-byte as it did before the flag existed. An
+                # absent key already means "not pinned", so writing a null would add a
+                # difference to every existing file to convey nothing.
+                **({"compat": options.compat} if options.compat is not None else {}),
             }
             if options is not None
             else None
@@ -242,6 +247,7 @@ def load_network(path: Path) -> Network:
             cbfe_mode=options_data.get("cbfe_mode", "off"),
             cbfe_base_cost=options_data.get("cbfe_base_cost", 8.0),
             cbfe_atom_weight=options_data.get("cbfe_atom_weight", 0.05),
+            compat=options_data.get("compat"),
             softcore=SoftcorePolicy(**softcore_data) if softcore_data else SoftcorePolicy(),
         )
 

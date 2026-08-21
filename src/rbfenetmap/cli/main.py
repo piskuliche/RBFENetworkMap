@@ -22,6 +22,8 @@ from rbfenetmap.cli._args import (
     add_mapping_arguments,
     add_network_arguments,
     add_softcore_arguments,
+    explicit_dests,
+    resolve_compat,
 )
 from rbfenetmap.core.exceptions import RBFENetworkMapError
 
@@ -146,6 +148,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # Which flags the user actually typed, which the parsed values cannot tell us once a
+    # release moves a default. build_parser() is called a second time deliberately:
+    # explicit_dests suppresses the defaults of whatever it is handed, so it must not be
+    # handed the parser above.
+    try:
+        resolve_compat(args, explicit_dests(build_parser(), argv))
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
     level = logging.WARNING - 10 * min(args.verbose, 2)
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")

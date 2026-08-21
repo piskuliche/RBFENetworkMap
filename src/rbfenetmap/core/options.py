@@ -13,9 +13,11 @@ from typing import Literal
 from rbfenetmap.core.models import EDGE_SEPARATOR, parse_edge_key
 
 __all__ = (
+    "COMPAT_LEVELS",
     "AlignmentMethod",
     "AlignmentOptions",
     "CBFEMode",
+    "CompatLevel",
     "ChargeChangePolicy",
     "CorePruningPolicy",
     "EdgeDirection",
@@ -37,6 +39,12 @@ EdgeDirection = Literal["fewer_softcore_first", "lexicographic", "heavier_second
 SelectionObjective = Literal["uniform_redundancy", "connectivity_then_cycles"]
 PairEvaluation = Literal["eager", "adaptive"]
 CBFEMode = Literal["off", "bridge", "cycles", "all"]
+CompatLevel = Literal["v0.4"]
+
+#: Released behaviours a run can be pinned to. Versioned rather than a single ``legacy``
+#: flag: "legacy" stops meaning anything the moment there are two of them, and the whole
+#: point of the mechanism is to still be unambiguous several releases from now.
+COMPAT_LEVELS: tuple[CompatLevel, ...] = ("v0.4",)
 
 #: Ordered from least to most CBFE usage. ``cycles`` includes everything ``bridge`` does,
 #: so a mode's position in this tuple is what the planner tests against rather than a
@@ -363,12 +371,17 @@ class NetworkOptions:
         with how much there is to decouple.
     softcore : SoftcorePolicy
         Feasibility policy handed to the repair.
+    compat : str, optional
+        The released behaviour this run was pinned to, or ``None``. Set by
+        :meth:`preset`; recorded so a planned network states which behaviour produced
+        it. Purely a label -- it changes nothing on its own, because :meth:`preset` has
+        already written the values it stands for.
 
     Raises
     ------
     ValueError
-        If an edge appears in both the forced and banned sets, or if a knob is
-        out of range.
+        If an edge appears in both the forced and banned sets, if a knob is
+        out of range, or if ``compat`` names an unknown level.
     """
 
     pair_strategy: PairStrategy = "all_unordered_pairs"
@@ -396,6 +409,7 @@ class NetworkOptions:
     cbfe_base_cost: float = 8.0
     cbfe_atom_weight: float = 0.05
     softcore: SoftcorePolicy = field(default_factory=SoftcorePolicy)
+    compat: str | None = None
 
     def __post_init__(self) -> None:
         """Reject contradictory or out-of-range settings."""
@@ -431,10 +445,96 @@ class NetworkOptions:
             raise ValueError("cbfe_base_cost must not be negative.")
         if self.cbfe_atom_weight < 0:
             raise ValueError("cbfe_atom_weight must not be negative.")
+        if self.compat is not None and self.compat not in COMPAT_LEVELS:
+            raise ValueError(f"Unknown compat level {self.compat!r}. Known: {list(COMPAT_LEVELS)}.")
         if self.pair_strategy == "star" and not self.hub:
             raise ValueError("pair_strategy='star' requires a hub ligand.")
         if self.pair_strategy == "explicit" and not self.explicit_pairs:
             raise ValueError("pair_strategy='explicit' requires explicit_pairs.")
+
+    @classmethod
+    def preset(cls, level: str, **overrides: object) -> "NetworkOptions":
+        """Return the options a released version of the package planned with.
+
+        Parameters
+        ----------
+        level : str
+            A member of :data:`COMPAT_LEVELS`.
+        **overrides
+            Applied on top of the pinned values. Intended for the settings that describe
+            *this run* rather than *this behaviour* -- the ligand-specific intent
+            (``hub``, ``forced_edges``, ``banned_edges``, ``explicit_pairs``) and the
+            operational knobs (``jobs``, ``show_progress``). Overriding an algorithmic
+            knob is permitted here and rejected at the CLI, where the user's intent is
+            unambiguous enough to call it a contradiction.
+
+        Returns
+        -------
+        NetworkOptions
+            With :attr:`compat` set to *level*.
+
+        Raises
+        ------
+        ValueError
+            If *level* is unknown.
+
+        Notes
+        -----
+        **Every value below is written out literally, and that is the entire point.**
+        Building this from the dataclass defaults would be shorter and would defeat the
+        mechanism: the moment a later release moves a default, the preset would move with
+        it and silently stop reproducing the version it names. These numbers are a record
+        of what v0.4.0 did, not a view onto what the current code does, so they must be
+        edited only to fix a transcription error -- never to track a new default.
+
+        The pinned surface is the *algorithmic* one. Ligand-specific intent is not pinned:
+        banning an edge or naming a hub is a statement about one ligand set, not about a
+        version's behaviour, so those stay available alongside a compat level.
+        """
+        if level not in COMPAT_LEVELS:
+            raise ValueError(f"Unknown compat level {level!r}. Known: {list(COMPAT_LEVELS)}.")
+
+        pinned: dict[str, object] = {
+            "pair_strategy": "all_unordered_pairs",
+            "n_edges": None,
+            "edges_per_ligand": 2,
+            "min_cycle_coverage": 1.0,
+            "require_connected": True,
+            "edge_direction": "fewer_softcore_first",
+            "prefilter": "none",
+            "prefilter_k": 8,
+            "prefilter_min_tanimoto": 0.4,
+            "selection_objective": "uniform_redundancy",
+            "max_cycle_size": None,
+            "pair_evaluation": "eager",
+            "adaptive_initial_neighbors": 3,
+            "adaptive_batch_size": 32,
+            "consistency": "pairwise",
+            "cbfe_mode": "off",
+            "cbfe_base_cost": 8.0,
+            "cbfe_atom_weight": 0.05,
+            "softcore": SoftcorePolicy(
+                ring_policy="ring_system",
+                max_softcore_atoms=12,
+                max_softcore_fraction=0.6,
+                min_core_atoms=4,
+                min_mcs_fraction=0.35,
+                core_rmsd_threshold=2.0,
+                charge_change_policy="penalize",
+                max_iterations=None,
+                core_pruning=CorePruningPolicy(
+                    demote_element_mismatch=False,
+                    demote_degree_mismatch=False,
+                    demote_formal_charge_mismatch=True,
+                    demote_aromaticity_mismatch=False,
+                    demote_ring_membership_mismatch=False,
+                    demote_light_element_swap=True,
+                ),
+            ),
+        }
+        pinned.update(overrides)
+        pinned["compat"] = level
+        return cls(**pinned)  # type: ignore[arg-type]
 
     @property
     def forced_pairs(self) -> frozenset[tuple[str, str]]:

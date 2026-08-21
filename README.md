@@ -97,6 +97,7 @@ The feasible candidate graph is disconnected: 2 components.
 
 | knob | effect |
 |---|---|
+| `--compat v0.4` | Pin every algorithmic knob to what a released version used, so a network stays reproducible after a default moves. Ligand intent, `--align`, and `--jobs`/`--progress` are not pinned and may be combined with it; naming a pinned knob is refused as a contradiction. |
 | `--n-edges` | Cap on total edges. Below `n_ligands - 1` with connectivity required is a **hard error**, never a silent trim. |
 | `--edges-per-ligand` | Target minimum degree. Best-effort; shortfalls are warned and recorded. |
 | `--min-cycle-coverage` | Fraction of ligands on a cycle. Cycles make free energies checkable against themselves. |

@@ -20,7 +20,9 @@ __all__ = (
     "CompatLevel",
     "ChargeChangePolicy",
     "CorePruningPolicy",
+    "CycleCoverageMode",
     "EdgeDirection",
+    "HubSelection",
     "PairEvaluation",
     "MappingOptions",
     "NetworkOptions",
@@ -38,6 +40,8 @@ PairStrategy = Literal["all_unordered_pairs", "all_pairs", "star", "linear", "ex
 EdgeDirection = Literal["fewer_softcore_first", "lexicographic", "heavier_second"]
 SelectionObjective = Literal["uniform_redundancy", "connectivity_then_cycles"]
 PairEvaluation = Literal["eager", "adaptive"]
+CycleCoverageMode = Literal["node", "edge"]
+HubSelection = Literal["most_partners", "min_total_cost"]
 CBFEMode = Literal["off", "bridge", "cycles", "all"]
 CompatLevel = Literal["v0.4"]
 
@@ -321,9 +325,38 @@ class NetworkOptions:
         Whether redundancy first tries to raise degree targets uniformly, or instead
         focuses on putting as many ligands as possible on at least one cycle after the
         spanning network has been built.
+    cycle_coverage_mode : {"node", "edge"}
+        What ``min_cycle_coverage`` is a fraction *of*. ``"node"`` (the default, and
+        LOMAP's rule) measures the ligands that lie on at least one cycle. ``"edge"``
+        measures the selected edges that lie on one, which is FEP+'s stated invariant and
+        is exactly 2-edge-connectivity: at coverage 1.0 the network has no bridges at all.
+        The edge form is strictly the harder target -- every bridge has covered endpoints
+        as soon as something else puts them on a cycle -- so it is opt-in rather than a
+        correction to the node form.
     max_cycle_size : int, optional
         Maximum cycle length allowed when adding redundancy edges to improve cycle
         coverage. ``None`` permits any cycle size.
+    max_diameter : int, optional
+        Target upper bound on the network's diameter -- the longest shortest path between
+        any two ligands, counted in edges. Statistical error accumulates along a path, so
+        LOMAP caps it at 6 and FEP+ below 5. ``None`` (the default) imposes no bound.
+
+        Best-effort, like the other redundancy targets: selection here is *additive*, so
+        the bound is approached by buying shortcut edges rather than, as LOMAP does, by
+        refusing to remove one. A pool with no shortcut left to sell warns and records the
+        shortfall instead of raising.
+    n_redundancy : int
+        Number of spanning trees the ``redundant-mst`` planner overlays. Ignored by every
+        other planner. Konnektor defaults to 2; the paper that introduced the topology
+        uses 3.
+    hub_selection : {"most_partners", "min_total_cost"}
+        How the ``star`` planner picks a hub when none is named. ``"most_partners"`` (the
+        default) ranks by feasible partner count and only breaks ties on cost, so it never
+        compares cost across ligands of differing connectivity. ``"min_total_cost"`` ranks
+        by summed cost to the partners a ligand does have, which is LOMAP's ``pick_lead``
+        and HiMap's ``ref_lig_gen``. OpenEye's own documentation calls hub choice the
+        dominant factor in a star map's performance, which is why it is a knob rather than
+        a constant.
     pair_evaluation : {"eager", "adaptive"}
         Whether to map every candidate before planning, or evaluate fingerprint-ranked
         batches until the requested network targets are met.
@@ -398,7 +431,11 @@ class NetworkOptions:
     prefilter_k: int = 8
     prefilter_min_tanimoto: float = 0.4
     selection_objective: SelectionObjective = "uniform_redundancy"
+    cycle_coverage_mode: CycleCoverageMode = "node"
     max_cycle_size: int | None = None
+    max_diameter: int | None = None
+    n_redundancy: int = 2
+    hub_selection: HubSelection = "most_partners"
     pair_evaluation: PairEvaluation = "eager"
     adaptive_initial_neighbors: int = 3
     adaptive_batch_size: int = 32
@@ -429,8 +466,16 @@ class NetworkOptions:
             raise ValueError("n_edges must be at least 1 when set.")
         if self.selection_objective not in ("uniform_redundancy", "connectivity_then_cycles"):
             raise ValueError("selection_objective must be 'uniform_redundancy' or 'connectivity_then_cycles'.")
+        if self.cycle_coverage_mode not in ("node", "edge"):
+            raise ValueError(f"cycle_coverage_mode must be 'node' or 'edge'; got {self.cycle_coverage_mode!r}.")
         if self.max_cycle_size is not None and self.max_cycle_size < 3:
             raise ValueError("max_cycle_size must be at least 3 when set.")
+        if self.max_diameter is not None and self.max_diameter < 1:
+            raise ValueError("max_diameter must be at least 1 when set; a two-ligand network already has diameter 1.")
+        if self.n_redundancy < 1:
+            raise ValueError("n_redundancy must be at least 1; one overlaid tree is a plain spanning tree.")
+        if self.hub_selection not in ("most_partners", "min_total_cost"):
+            raise ValueError(f"hub_selection must be 'most_partners' or 'min_total_cost'; got {self.hub_selection!r}.")
         if self.pair_evaluation not in ("eager", "adaptive"):
             raise ValueError("pair_evaluation must be 'eager' or 'adaptive'.")
         if self.adaptive_initial_neighbors < 1:
@@ -505,7 +550,15 @@ class NetworkOptions:
             "prefilter_k": 8,
             "prefilter_min_tanimoto": 0.4,
             "selection_objective": "uniform_redundancy",
+            # v0.4.0 measured cycle coverage over ligands and had no diameter bound, no
+            # overlaid-MST planner, and one hub rule. The knobs did not exist, so the value
+            # that reproduces the version is whichever one makes each a no-op -- not
+            # whichever one a later release settles on as its default.
+            "cycle_coverage_mode": "node",
             "max_cycle_size": None,
+            "max_diameter": None,
+            "n_redundancy": 2,
+            "hub_selection": "most_partners",
             "pair_evaluation": "eager",
             "adaptive_initial_neighbors": 3,
             "adaptive_batch_size": 32,

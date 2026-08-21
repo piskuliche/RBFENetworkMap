@@ -89,7 +89,13 @@ COMPAT_CLI_PINS: dict[str, dict[str, Any]] = {
         "prefilter_k": 8,
         "prefilter_min_tanimoto": 0.4,
         "selection_objective": "uniform_redundancy",
+        # None of these four existed in v0.4.0, so the value that reproduces it is the one
+        # that makes each a no-op rather than whatever the current default happens to be.
+        "cycle_coverage_mode": "node",
         "max_cycle_size": None,
+        "max_diameter": None,
+        "n_redundancy": 2,
+        "hub_selection": "most_partners",
         "pair_evaluation": "eager",
         "adaptive_initial_neighbors": 3,
         "adaptive_batch_size": 32,
@@ -443,10 +449,47 @@ def add_network_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     group.add_argument(
+        "--cycle-coverage-mode",
+        choices=("node", "edge"),
+        default="node",
+        help=(
+            "What --min-cycle-coverage counts (default: %(default)s). 'node' is the fraction of "
+            "ligands lying on a cycle; 'edge' is the fraction of selected edges lying on one, which "
+            "at 1.0 means the network has no bridges at all. 'edge' is the stricter target."
+        ),
+    )
+    group.add_argument(
         "--max-cycle-size",
         type=int,
         metavar="N",
         help="When improving cycle coverage, prefer cycles of at most N ligands.",
+    )
+    group.add_argument(
+        "--max-diameter",
+        type=int,
+        metavar="N",
+        help=(
+            "Target upper bound on the longest shortest path between two ligands, in edges. "
+            "Statistical error accumulates along a path; LOMAP caps this at 6 and FEP+ below 5. "
+            "Best-effort: a pool with no shortcut left to sell reports the shortfall rather than failing."
+        ),
+    )
+    group.add_argument(
+        "--n-redundancy",
+        type=int,
+        default=2,
+        metavar="N",
+        help="Spanning trees overlaid by the 'redundant-mst' planner (default: %(default)s). Ignored by others.",
+    )
+    group.add_argument(
+        "--hub-selection",
+        choices=("most_partners", "min_total_cost"),
+        default="most_partners",
+        help=(
+            "How the 'star' planner picks a hub when --hub is not given (default: %(default)s). "
+            "'most_partners' ranks by feasible partner count, breaking ties on cost; 'min_total_cost' "
+            "ranks by summed cost, which is LOMAP's rule."
+        ),
     )
     group.add_argument(
         "--pair-evaluation",
@@ -569,7 +612,11 @@ def build_network_options(args: argparse.Namespace) -> NetworkOptions:
         prefilter_k=args.prefilter_k,
         prefilter_min_tanimoto=args.prefilter_min_tanimoto,
         selection_objective=args.selection_objective,
+        cycle_coverage_mode=args.cycle_coverage_mode,
         max_cycle_size=args.max_cycle_size,
+        max_diameter=args.max_diameter,
+        n_redundancy=args.n_redundancy,
+        hub_selection=args.hub_selection,
         pair_evaluation=args.pair_evaluation,
         adaptive_initial_neighbors=args.adaptive_initial_neighbors,
         adaptive_batch_size=args.adaptive_batch_size,

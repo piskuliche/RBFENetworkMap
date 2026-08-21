@@ -10,6 +10,7 @@ Command line
    rbfenet report    Render a self-contained HTML report.
    rbfenet plugins   List plugins and their availability.
    rbfenet inspect   Show everything known about one edge.
+   rbfenet diagnose  Report network-level metrics for a planned network.
 
 Exit codes: ``0`` success, ``1`` a package-level failure (unsatisfiable constraints, a
 missing plugin, unreadable input), ``2`` an argparse usage error. Package errors print a
@@ -70,6 +71,32 @@ mapping every pair.
 expensive mapping stage, so a problem knowable from the inputs alone does not cost a full
 planning run to discover.
 
+To bound how far apart two ligands can be in the network, and to require that every
+selected edge -- not merely every ligand -- lies on a cycle:
+
+.. code-block:: bash
+
+   rbfenet plan --ligands ligands.sdf \
+                --max-diameter 5 \
+                --cycle-coverage-mode edge \
+                --out network.json
+
+Both are best-effort and both default to what the planner already did: ``--max-diameter``
+is unset and ``--cycle-coverage-mode`` is ``node``. A target the candidate pool cannot
+deliver is warned about and recorded on ``unmet_constraints``, never raised.
+
+For a network built from overlaid spanning trees rather than a tree plus greedy
+redundancy:
+
+.. code-block:: bash
+
+   rbfenet plan --ligands ligands.sdf --planner redundant-mst --n-redundancy 2 \
+                --out network.json
+
+``--cost-units gpu_hours`` restates the reported cost as estimated machine time and a
+dollar figure. It is a display unit: it cannot change which edges are chosen, and it is
+usable alongside ``--compat``.
+
 To generate a browsable HTML report alongside the JSON network:
 
 .. code-block:: bash
@@ -117,6 +144,21 @@ The command that makes the algorithm auditable.
 
    rbfenet inspect --network network.json --edge "lig_a~lig_b" \
                    --show-repair-trace --show-descriptors --show-masks
+
+diagnose
+--------
+
+Network-level metrics: cost, degree spread, isolated ligands, diameter, short cycle count,
+Monte-Carlo failure robustness, and how the edge count compares with the ``n ln n``
+precision floor. ``inspect`` is per-edge; this is per-network.
+
+.. code-block:: bash
+
+   rbfenet diagnose --network network.json --cost-units gpu_hours
+   rbfenet diagnose --network network.json --format json --seed 0
+
+``--seed`` fixes the robustness estimate, and it defaults to ``0`` so two runs over the
+same file always agree. The same table is folded into the HTML report.
 
 report
 ------

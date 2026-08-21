@@ -6,8 +6,8 @@ guarantee hold.
 
 1. **Minimum spanning tree**, seeded so that forced edges are already in it. This spans
    every ligand whenever the feasible candidate graph is connected.
-2. **A purely additive redundancy pass** that raises degrees and closes cycles without
-   ever removing a tree edge.
+2. **A purely additive redundancy pass** that raises degrees, closes cycles, and -- when
+   ``max_diameter`` is set -- buys shortcuts, without ever removing a tree edge.
 
 Because the second stage only adds, connectivity established in the first cannot be lost.
 
@@ -68,6 +68,58 @@ component of a single edge and its endpoints would be counted as covered when th
 When ``selection_objective="connectivity_then_cycles"``, candidate additions are ranked
 by how many *new* ligands they place on a cycle, then by cycle length, then by cost.
 ``max_cycle_size`` can be used to ignore long loops and prefer triangles or 4-cycles.
+
+What coverage is measured over
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``cycle_coverage_mode`` chooses the *unit* ``min_cycle_coverage`` is a fraction of.
+
+``node`` (default)
+   The fraction of **ligands** on at least one cycle. This is LOMAP's rule and what the
+   package has always measured.
+
+``edge``
+   The fraction of **selected edges** on at least one cycle -- equivalently, the selected
+   edges minus :func:`networkx.bridges`. At coverage 1.0 the network has no bridges at
+   all, which is exactly 2-edge-connectivity. That is FEP+'s stated invariant, and the
+   target Xu, NetBFE, and Konnektor converge on independently.
+
+The edge form is **strictly harder**, which is why it is opt-in rather than a correction
+to the node form. Two triangles joined by a single edge satisfy the node rule completely
+-- every ligand is on a cycle -- while the joining edge is checked by nothing. And it is
+the edge that carries the free energy.
+
+The denominator moves under the edge rule: each edge added is one more edge that must
+itself end up on a cycle. That is the intended reading, so the ratio is recomputed on each
+pass rather than fixed once as the node target is.
+
+Path length
+-----------
+
+Statistical error accumulates along a path, so two ligands comparable only across nine
+hops are worse related than the edge count suggests. LOMAP caps the network diameter at 6
+and FEP+ below 5; ``max_diameter`` is that bound here, and it is unset by default.
+
+Both of those tools enforce their bound during edge **removal**, where the question is
+which edge to keep. Selection here is additive -- the spanning tree is never trimmed, and
+that is what makes the connectivity guarantee hold -- so the bound is approached from the
+other side. A third redundancy pass greedily buys the shortcut that shortens the network
+most per unit of cost, and repeats until the bound is met or the pool runs out.
+
+The diameter is recomputed with ``usebounds=True`` (the FastLomap optimisation,
+`arXiv:2304.04713 <https://arxiv.org/pdf/2304.04713>`_), which replaces the all-pairs
+sweep with a handful of breadth-first searches and is what makes a per-candidate
+re-evaluation affordable past a hundred ligands.
+
+Like ``edges_per_ligand`` and ``min_cycle_coverage``, this is **best-effort**: a pool with
+no shortcut left to sell warns and lands on ``unmet_constraints`` rather than raising. A
+network longer than asked for is still a usable network. If the selected network is
+disconnected the pass says so instead -- the diameter is undefined across components, and
+reporting an unmet bound would send the reader after the wrong knob.
+
+The pass draws from the RBFE-only pool, on the same reasoning that keeps degree raising
+off counterpoised edges: shortening a path that already exists is a refinement, not a
+rescue, and two absolute calculations is not a trade anyone would make for one.
 
 Counterpoised (CBFE) edges
 --------------------------
@@ -263,7 +315,7 @@ Knob precedence
      - Caps the redundancy pass. ``n_edges < n_ligands - 1`` with connectivity required is
        a **hard error** -- see below.
    * - 5
-     - ``edges_per_ligand``, ``min_cycle_coverage``
+     - ``edges_per_ligand``, ``min_cycle_coverage``, ``max_diameter``
      - Best-effort. Shortfalls warn and land on ``unmet_constraints``; never raise.
    * - 6
      - ``hub``
@@ -295,12 +347,103 @@ arithmetic spelled out:
    n_edges=8 cannot connect 12 ligands; a spanning network needs at least 11 edges.
    Raise n_edges to >= 11, or pass require_connected=False.
 
+Edge budget
+-----------
+
+Pitman *et al.*, *JCIM* 2023, 63, 1776-1793 derive a floor of roughly ``n ln n`` edges,
+below which precision degrades **faster as the series grows**. At 40 ligands that is 148
+edges, where the default ``edges_per_ligand=2`` buys about 40.
+
+The package reports the comparison and does not warn about it. With the default settings
+every network this tool has ever planned sits below the floor, so a
+:func:`warnings.warn` would fire on every run and be filtered out within a week. It
+appears in the ``plan`` summary and in ``rbfenet diagnose`` instead, where the user asked
+for it. It is a floor for *precision*, not for correctness: a network below it is valid,
+its free energies simply carry more uncertainty than a denser one over the same ligands.
+
+Diagnostics
+-----------
+
+``rbfenet diagnose --network network.json`` reports the network-level metrics:
+total and per-edge cost, degree spread and isolated ligands, diameter, short cycle count,
+Monte-Carlo failure robustness, and the edge-budget comparison above. The same table is
+folded into the HTML report.
+
+``inspect`` stays per-edge and ``diagnose`` is per-network; they are separate commands
+because they answer questions at different scales.
+
+The robustness estimate removes each edge independently with probability
+``--failure-rate`` and reports how often the remainder still spans, plus how many ligands
+survive on average. :func:`~rbfenetmap.core.diagnostics.failure_robustness` takes a
+**mandatory** seed -- it is the only Monte-Carlo function in the package, everything
+around it asserts determinism, and a defaulted seed is a defaulted seed right up until
+someone leaves it off. The CLI and the HTML report supply a fixed one so two runs over the
+same file agree.
+
+Cost in machine time
+--------------------
+
+``--cost-units gpu_hours`` restates the network cost as estimated GPU-hours and a dollar
+figure, using the measured per-edge figures from Tsai *et al.*, *JCIM* 2026, 66, 1626-1636
+(3.97 GPU-h per RBFE edge at 12 lambda windows, 3.2x that for a counterpoised one at 25)
+priced at Pitman 2023's $0.40 per GPU-hour.
+
+**This is reporting only.** ``cbfe_base_cost`` is untouched, no planner reads a
+:class:`~rbfenetmap.core.cost.CostModel`, and the flag cannot move a single edge. A
+wall-clock price is a constant per edge kind, and feeding it into selection would make
+counterpoised edges uniformly unaffordable -- which is precisely the confusion the
+"eligibility is a gate, not a price" rule above exists to prevent.
+
+``--cost-units`` is also deliberately absent from ``--compat``'s pin tables. It is a
+display unit on the same footing as ``--format``: reproducing a released behaviour is a
+claim about which network comes out, not about what units it is printed in.
+
+Importing an existing map
+-------------------------
+
+:func:`~rbfenetmap.io.loaders.load_fepplus_network` and
+:func:`~rbfenetmap.io.loaders.load_orion_network` read a Schrodinger FEP+ (``A >>> B``) or
+OpenEye Orion (``A >> B``) edge list into ``explicit_pairs``::
+
+   from rbfenetmap.core.options import NetworkOptions
+   from rbfenetmap.io.loaders import load_fepplus_network
+
+   options = NetworkOptions(
+       pair_strategy="explicit", explicit_pairs=load_fepplus_network("map.edge")
+   )
+
+Only the topology is imported; the foreign atom mappings are not read, and this package
+maps every imported pair itself. That is the point rather than a limitation -- the reason
+to import a map is usually to put it through this package's feasibility rules -- but it
+does mean an edge FEP+ was happy with can come back rejected, and the ``explicit`` planner
+says so loudly instead of dropping it.
+
 Other planners
 --------------
 
+``redundant-mst``
+   ``n_redundancy`` overlaid spanning trees: run Kruskal, delete the edges it chose from a
+   working copy, and run it again. Konnektor builds its default network this way with two
+   trees; the paper that introduced the topology uses three. The point is not more edges
+   but *independent* ones -- a ligand's second edge belongs to a structure that spans
+   without the first tree, rather than to whatever the greedy degree pass found cheap
+   nearby. The usual redundancy passes then run on top, unchanged.
+
 ``star``
-   Every ligand joined to one hub. The hub defaults to the most central compound -- the
-   one with the most feasible partners, tie-broken on total cost.
+   Every ligand joined to one hub. ``hub_selection`` decides which, and OpenEye's own
+   documentation calls that choice the dominant factor in a star map's performance.
+
+   ``most_partners`` (default)
+      The most feasible partners, tie-broken on total cost. Cost is therefore never
+      compared across ligands of differing connectivity, so the cheapest well-connected
+      hub can lose to a slightly better-connected expensive one.
+
+   ``min_total_cost``
+      Lowest summed cost to *every other ligand*, charging an unreachable partner the
+      worst cost in the pool. This is LOMAP's ``pick_lead`` and HiMap's ``ref_lig_gen``,
+      which sum a similarity matrix in which an unrelatable pair scores zero. Summing only
+      the feasible partners would invert the intent: a ligand with one cheap partner would
+      total less than a well-connected one and win outright.
 
 ``explicit``
    Exactly the edges named. Refuses to silently omit an infeasible one.

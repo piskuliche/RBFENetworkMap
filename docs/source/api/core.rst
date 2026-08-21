@@ -40,6 +40,13 @@ Pipeline
 
 .. automodule:: rbfenetmap.core.cbfe
 
+Diagnostics and cost
+--------------------
+
+.. automodule:: rbfenetmap.core.diagnostics
+
+.. automodule:: rbfenetmap.core.cost
+
 Plugin registry
 ---------------
 

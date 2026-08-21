@@ -353,10 +353,11 @@ class NetworkOptions:
         How the ``star`` planner picks a hub when none is named. ``"most_partners"`` (the
         default) ranks by feasible partner count and only breaks ties on cost, so it never
         compares cost across ligands of differing connectivity. ``"min_total_cost"`` ranks
-        by summed cost to the partners a ligand does have, which is LOMAP's ``pick_lead``
-        and HiMap's ``ref_lig_gen``. OpenEye's own documentation calls hub choice the
-        dominant factor in a star map's performance, which is why it is a knob rather than
-        a constant.
+        by summed cost to *every other ligand*, charging an unreachable partner the worst
+        cost in the pool; that is LOMAP's ``pick_lead`` and HiMap's ``ref_lig_gen``, which
+        sum a similarity matrix in which an unrelatable pair scores zero. OpenEye's own
+        documentation calls hub choice the dominant factor in a star map's performance,
+        which is why it is a knob rather than a constant.
     pair_evaluation : {"eager", "adaptive"}
         Whether to map every candidate before planning, or evaluate fingerprint-ranked
         batches until the requested network targets are met.

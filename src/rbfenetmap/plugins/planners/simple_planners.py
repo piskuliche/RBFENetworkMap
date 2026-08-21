@@ -8,7 +8,6 @@ the point is to measure every edge rather than to economise.
 
 from __future__ import annotations
 
-import math
 from typing import ClassVar, Mapping, Sequence
 
 from rbfenetmap.core.exceptions import NetworkPlanError
@@ -101,8 +100,8 @@ class StarPlanner(AbstractNetworkPlanner):
             better-connected expensive one.
 
             ``"min_total_cost"`` is LOMAP's ``pick_lead`` and HiMap's ``ref_lig_gen``:
-            lowest summed cost to the partners a ligand actually has, which is the same
-            thing as highest summed similarity. Partner count then breaks *its* ties.
+            lowest summed cost to *every other ligand*, which is the same thing as highest
+            summed similarity. Partner count then breaks *its* ties.
 
         Returns
         -------
@@ -110,9 +109,17 @@ class StarPlanner(AbstractNetworkPlanner):
 
         Notes
         -----
-        Under ``"min_total_cost"`` a ligand with no feasible partner sums to zero and would
-        otherwise win outright, so it is ranked at infinity instead. A hub with no spokes is
-        not a cheap hub; it is not a hub.
+        The summed cost under ``"min_total_cost"`` runs over every other ligand, not only
+        over the feasible partners, and that is what makes the comparison mean anything.
+        LOMAP sums a similarity matrix in which an unrelatable pair scores zero, so a
+        ligand is penalised for the partners it *cannot* reach. Summing only the feasible
+        ones inverts that: a ligand with a single cheap partner would total less than a
+        well-connected one and win outright, which is the opposite of a hub.
+
+        An unreachable partner is therefore charged the worst cost anything in this pool
+        cost. Deriving the stand-in from the pool rather than fixing a constant keeps it on
+        whatever scale the active scorer uses -- the scorers here have no shared ceiling,
+        so any literal would be right for one of them and arbitrary for the rest.
         """
         totals: dict[str, float] = {name: 0.0 for name in ligands}
         counts: dict[str, int] = {name: 0 for name in ligands}
@@ -121,7 +128,11 @@ class StarPlanner(AbstractNetworkPlanner):
                 totals[name] += edge.score.total
                 counts[name] += 1
         if hub_selection == "min_total_cost":
-            return min(ligands, key=lambda n: (totals[n] if counts[n] else math.inf, -counts[n], n))
+            if not feasible:
+                return min(ligands)
+            unreachable = max(edge.score.total for edge in feasible.values())
+            partners = len(ligands) - 1
+            return min(ligands, key=lambda n: (totals[n] + unreachable * (partners - counts[n]), -counts[n], n))
         return min(ligands, key=lambda n: (-counts[n], totals[n], n))
 
 

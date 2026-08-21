@@ -136,6 +136,11 @@ class TestCLIConflicts:
             ("--scorer", "lomaplike"),
             ("--min-cycle-coverage", "0.5"),
             ("--pair-evaluation", "adaptive"),
+            # v0.4 declared --consistency and implemented nothing for it, so its v0.4
+            # behaviour is "the knob does nothing". Now that 'graph' does something, the
+            # pin has to keep meaning the inert half -- which it does, unchanged, because
+            # naming the knob at all is the contradiction.
+            ("--consistency", "graph"),
         ],
     )
     def test_pinned_knob_is_refused(self, tmp_path, capsys, flag, value):

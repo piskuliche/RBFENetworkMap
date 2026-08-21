@@ -324,7 +324,8 @@ def add_network_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="N",
         help="Worker threads for pair mapping (default: %(default)s). Mapping is partly "
         "pure Python, so speedup is sublinear and there is nothing to gain from setting "
-        "this above the CPU count.",
+        "this above the CPU count. Each worker also holds its own MCS search, so peak "
+        "memory scales with this: roughly 40 MB per second of --mcs-timeout per job.",
     )
 
 

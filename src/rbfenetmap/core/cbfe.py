@@ -30,6 +30,13 @@ answered by :func:`select_cbfe_bridges`: a maximum-merit spanning forest over th
 component quotient graph, where merit combines pairwise similarity with how well connected
 each endpoint is inside its own subnetwork. See :func:`bridge_rank_key` for why both terms
 are there.
+
+The forest sweep itself is :func:`select_bridges`, which takes the partition as an argument
+instead of deriving it. Connected components are only one interesting partition of a ligand
+set -- a chemical clustering is another, and joining *those* groups is the same problem with
+the same ranking. Keeping the partition a parameter is what lets clustered planning in
+:mod:`rbfenetmap.core.clustering` reuse this machinery rather than grow a second copy of it
+that would drift.
 """
 
 from __future__ import annotations
@@ -54,6 +61,7 @@ __all__ = (
     "cbfe_cost",
     "component_centrality",
     "make_cbfe_transformation",
+    "select_bridges",
     "select_cbfe_bridges",
 )
 
@@ -266,16 +274,131 @@ def bridge_rank_key(
     return (-merit, cost.get(pair, 0.0), pair)
 
 
+def select_bridges(
+    partition: Mapping[str, int],
+    ligands: Mapping[str, Ligand],
+    pool: Mapping[tuple[str, str], float],
+    *,
+    graph: "nx.Graph | None" = None,
+    n_per_pair: int = 1,
+) -> list[tuple[str, str]]:
+    """Choose the edges that join the groups of *partition* into one network.
+
+    A maximum-merit spanning forest over the *quotient graph of the partition*, by the same
+    union-find sweep the planner's Kruskal pass uses. With ``g`` groups exactly ``g - 1``
+    group pairs must be joined, and picking which ``g - 1`` is precisely a spanning
+    selection -- ranking each group *pair* separately would produce ``C(g, 2)`` winners and
+    still leave the same problem to solve.
+
+    The partition is a **parameter** rather than something derived here, and that is what
+    makes the function reusable. :func:`select_cbfe_bridges` passes the connected components
+    of the feasible RBFE graph, which is the "these pieces cannot reach each other" case.
+    Clustered planning passes the clusterer's partition, which is the "these pieces *can*
+    reach each other but the budget is better spent inside them" case. Both want the same
+    thing -- the most trustworthy few edges crossing a boundary -- and neither wants to
+    reimplement the ranking.
+
+    Parameters
+    ----------
+    partition : Mapping[str, int]
+        Group index per ligand name. Pairs whose endpoints are missing from it are ignored.
+    ligands : Mapping[str, Ligand]
+    pool : Mapping[tuple[str, str], float]
+        Eligible pairs and their costs. CBFE costs from :func:`build_cbfe_pool` for the
+        connectivity case, RBFE edge costs for the clustered case.
+    graph : networkx.Graph, optional
+        The graph the endpoints live in, used only for :func:`component_centrality`. Not
+        mutated. Without it, centrality contributes nothing and bridges rank on similarity
+        and cost alone -- which is the right degradation, since "how well connected is this
+        ligand" has no answer without a graph to ask it of.
+    n_per_pair : int, optional
+        Edges to take across each joined group pair. ``1`` gives the minimal spanning
+        selection. ``2`` puts the crossing itself on a cycle: two edges between the same two
+        groups, plus the paths inside each group, form a loop through both of them -- which
+        applies the every-edge-in-a-cycle invariant precisely to the edges that most need
+        checking.
+
+    Returns
+    -------
+    list[tuple[str, str]]
+        Sorted endpoint pairs, in selection order. Shorter than ``n_per_pair * (g - 1)``
+        whenever the pool cannot supply that many crossings -- every remaining pair having
+        been banned, or simply absent. The caller reports that; this function does not
+        raise, because the planner has a much better diagnostic to hand than anything
+        available here.
+
+    Notes
+    -----
+    Centrality is computed once, on the graph as given, and not refreshed as bridges are
+    added. Refreshing would make the outcome depend on selection order and would also
+    contradict the intent: the question is how well connected a ligand is inside the group
+    it came from, not how connected it became by being chosen.
+    """
+    if not pool or n_per_pair < 1:
+        return []
+
+    groups: dict[int, set[str]] = {}
+    for name, index in partition.items():
+        groups.setdefault(index, set()).add(name)
+    if len(groups) < 2:
+        return []
+
+    crossing = [
+        pair
+        for pair in pool
+        if pair[0] in partition and pair[1] in partition and partition[pair[0]] != partition[pair[1]]
+    ]
+    if not crossing:
+        return []
+
+    from rbfenetmap.core.pairs import fingerprint_pair_similarities
+
+    similarity = fingerprint_pair_similarities(ligands, crossing)
+    centrality = component_centrality(graph, [groups[index] for index in sorted(groups)]) if graph is not None else {}
+    ranked = sorted(crossing, key=lambda p: bridge_rank_key(p, similarity=similarity, centrality=centrality, cost=pool))
+
+    parent = {index: index for index in groups}
+
+    def find(index: int) -> int:
+        """Union-find with path compression, over group indices."""
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    bridges: list[tuple[str, str]] = []
+    taken: dict[tuple[int, int], int] = {}
+    needed = len(groups) - 1
+    for pair in ranked:
+        first, second = partition[pair[0]], partition[pair[1]]
+        key = (min(first, second), max(first, second))
+        if key in taken:
+            # An already-joined group pair may still be owed its remaining crossings. The
+            # union-find below would reject them as redundant, which is exactly right for
+            # connectivity and exactly wrong for putting the crossing on a cycle.
+            if taken[key] < n_per_pair:
+                taken[key] += 1
+                bridges.append(pair)
+        elif find(first) != find(second):
+            parent[find(second)] = find(first)
+            taken[key] = 1
+            bridges.append(pair)
+        if len(taken) == needed and all(count >= n_per_pair for count in taken.values()):
+            break
+    return bridges
+
+
 def select_cbfe_bridges(
     graph: "nx.Graph", ligands: Mapping[str, Ligand], pool: Mapping[tuple[str, str], float]
 ) -> list[tuple[str, str]]:
     """Choose the CBFE edges that join *graph* into one component.
 
-    A maximum-merit spanning forest over the component quotient graph, by the same
-    union-find sweep the planner's Kruskal pass uses. With ``c`` components exactly
-    ``c - 1`` bridges are needed, and picking which ``c - 1`` is precisely a spanning
-    selection -- ranking each component *pair* separately would produce ``C(c, 2)`` winners
-    and still leave the same problem to solve.
+    A thin caller of :func:`select_bridges` over the partition induced by *graph*'s own
+    connected components: with ``c`` components, exactly ``c - 1`` bridges. One crossing per
+    joined pair, because a second CBFE edge between the same two components would buy a
+    cycle at the price of two more absolute calculations -- and the mode that pays for
+    counterpoised cycle coverage is ``cbfe_mode="cycles"``, which the planner applies
+    afterwards on the merits of each ligand rather than blindly per component pair.
 
     Parameters
     ----------
@@ -288,17 +411,7 @@ def select_cbfe_bridges(
     Returns
     -------
     list[tuple[str, str]]
-        Sorted endpoint pairs, in selection order. Shorter than ``c - 1`` only when the
-        pool cannot span the components -- every remaining cross-component pair having been
-        banned. The caller reports that; this function does not raise, because the planner
-        has a much better diagnostic to hand than anything available here.
-
-    Notes
-    -----
-    Centrality is computed once, on the pre-bridge graph, and not refreshed as bridges are
-    added. Refreshing would make the outcome depend on selection order and would also
-    contradict the intent: the question is how well connected a ligand is inside the
-    subnetwork it came from, not how connected it became by being chosen.
+        Sorted endpoint pairs, in selection order.
     """
     import networkx as nx
 
@@ -309,34 +422,5 @@ def select_cbfe_bridges(
     if len(components) < 2:
         return []
 
-    membership = {name: index for index, component in enumerate(components) for name in component}
-    crossing = [pair for pair in pool if membership[pair[0]] != membership[pair[1]]]
-    if not crossing:
-        return []
-
-    from rbfenetmap.core.pairs import fingerprint_pair_similarities
-
-    similarity = fingerprint_pair_similarities(ligands, crossing)
-    centrality = component_centrality(graph, components)
-    ranked = sorted(crossing, key=lambda p: bridge_rank_key(p, similarity=similarity, centrality=centrality, cost=pool))
-
-    parent = {index: index for index in range(len(components))}
-
-    def find(index: int) -> int:
-        """Union-find with path compression, over component indices."""
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    bridges: list[tuple[str, str]] = []
-    needed = len(components) - 1
-    for pair in ranked:
-        root_a, root_b = find(membership[pair[0]]), find(membership[pair[1]])
-        if root_a == root_b:
-            continue
-        parent[root_b] = root_a
-        bridges.append(pair)
-        if len(bridges) == needed:
-            break
-    return bridges
+    partition = {name: index for index, component in enumerate(components) for name in component}
+    return select_bridges(partition, ligands, pool, graph=graph, n_per_pair=1)

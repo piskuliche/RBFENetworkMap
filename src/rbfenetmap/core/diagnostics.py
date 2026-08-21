@@ -130,7 +130,7 @@ def load_edge_lmi(
 
 
 def lmi_threshold(values: Sequence[float], *, quantile: float = 0.9) -> float:
-    """Return the *quantile* cut point of *values*, by nearest-rank.
+    """Return the *quantile* cut point of *values*, linearly interpolated.
 
     Parameters
     ----------
@@ -141,8 +141,8 @@ def lmi_threshold(values: Sequence[float], *, quantile: float = 0.9) -> float:
     Returns
     -------
     float
-        The smallest value at or above the requested rank. Edges strictly above it are the
-        ones pruned, so a network whose LMIs are all equal loses none of them.
+        The cut. Edges strictly above it are the ones pruned, so a network whose LMIs are
+        all equal loses none of them however low the quantile.
 
     Raises
     ------
@@ -151,17 +151,22 @@ def lmi_threshold(values: Sequence[float], *, quantile: float = 0.9) -> float:
 
     Notes
     -----
-    Nearest-rank rather than an interpolated quantile, so the threshold is always a value
-    the analysis actually reported. An interpolated cut sitting between two edges' LMIs is
-    harder to explain to the person who has to justify dropping one of them.
+    Interpolated rather than nearest-rank, and on a small network the difference decides
+    whether anything is pruned at all. With five edges, nearest-rank at ``0.9`` lands
+    exactly on the largest observed value, and "strictly above the largest value" is
+    nothing -- so the worst edge in the network would survive a request to prune the worst
+    tenth of it. Interpolation puts the cut strictly between the two largest values
+    instead, where the answer does not depend on a tie at the boundary.
     """
     if not 0.0 <= quantile <= 1.0:
         raise ValueError(f"quantile must lie in [0, 1]; got {quantile}.")
-    ordered = sorted(values)
+    ordered = sorted(float(value) for value in values)
     if not ordered:
         raise ValueError("Cannot compute an LMI threshold from an empty set of values.")
-    index = min(len(ordered) - 1, max(0, int(round(quantile * (len(ordered) - 1)))))
-    return ordered[index]
+    position = quantile * (len(ordered) - 1)
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    return ordered[lower] + (position - lower) * (ordered[upper] - ordered[lower])
 
 
 def select_high_lmi_edges(

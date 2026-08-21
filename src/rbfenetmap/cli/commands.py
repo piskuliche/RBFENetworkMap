@@ -431,6 +431,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 def cmd_plugins(args: argparse.Namespace) -> int:
     """List registered plugins and their availability."""
     from rbfenetmap.plugins.exporters import BUILTIN_EXPORTERS
+    from rbfenetmap.plugins.intermediates import BUILTIN_INTERMEDIATES
     from rbfenetmap.plugins.mappers import BUILTIN_MAPPERS
     from rbfenetmap.plugins.planners import BUILTIN_PLANNERS
     from rbfenetmap.plugins.scorers import BUILTIN_SCORERS
@@ -440,6 +441,7 @@ def cmd_plugins(args: argparse.Namespace) -> int:
         "scorer": BUILTIN_SCORERS,
         "planner": BUILTIN_PLANNERS,
         "exporter": BUILTIN_EXPORTERS,
+        "intermediate": BUILTIN_INTERMEDIATES,
     }
     kinds = [args.kind] if args.kind else list(tables)
 

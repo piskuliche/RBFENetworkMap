@@ -1,12 +1,13 @@
 ---
 name: rbfenet-plugins
-description: Adding or modifying a mapper, scorer, planner, or exporter in rbfenetmap — the PluginSpec registry, the four ABCs in core/meta, lazy imports, and optional-dependency handling. Use when extending the pipeline or when a plugin is unavailable or fails to register.
+description: Adding or modifying a mapper, scorer, planner, exporter, or intermediate generator in rbfenetmap — the PluginSpec registry, the five ABCs in core/meta, lazy imports, and optional-dependency handling. Use when extending the pipeline or when a plugin is unavailable or fails to register.
 ---
 
 # Adding a plugin
 
-Four kinds — `mapper`, `scorer`, `planner`, `exporter` — each an ABC in `core/meta/` with
-implementations under `plugins/<kind>s/`. The registry (`core/pluginregistry.py`) is adapted
+Five kinds — `mapper`, `scorer`, `planner`, `exporter`, `intermediate` — each an ABC in
+`core/meta/` with implementations under `plugins/<kind>s/`. The registry
+(`core/pluginregistry.py`) is adapted
 from `pharmaforge.core.pluginregistry`; keep the two recognisably the same mechanism.
 
 ## The rule everything else follows from
@@ -55,6 +56,20 @@ Keep that shape: an error message here is the whole diagnostic the user gets.
 and will catch an eager backend import. A test that needs an uninstalled backend gets
 `@pytest.mark.optional_dep`; anything genuinely slow gets `@pytest.mark.slow`. Prefer the
 `Dummy*` plugins in `conftest.py` for everything downstream of the plugin boundary.
+
+## Intermediate generators specifically
+
+The one kind whose output changes the *ligand set*, not the network over it. It proposes
+molecules and nothing else: `ProposedMolecule.mol` carries **no conformer** (posing is
+centralised in `core/posing.py`, and a `ProposedMolecule` strips any conformer it is
+handed), `ProposedLink.hint` is advisory and must never reach an `EdgeScore.total`, and
+`IntermediateProposal.rejection` is a plain `str` — `RejectionReason` is the vocabulary of
+*edge* feasibility and is not reused here.
+
+A generator that knows where its atoms belong says so with a complete `parent_atom_map`,
+which spares the poser a `GetSubstructMatch` whose symmetry it would have to resolve by
+guessing. Posing failures are data: `pose_intermediate` returns a `PoseResult` carrying a
+`PoseRejection`, never an exception.
 
 ## Exporters specifically
 

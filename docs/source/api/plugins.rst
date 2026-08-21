@@ -44,3 +44,10 @@ Exporters
 .. automodule:: rbfenetmap.plugins.exporters.amber_exporter
 
 .. automodule:: rbfenetmap.plugins.exporters.html_exporter
+
+Intermediate generators
+-----------------------
+
+.. automodule:: rbfenetmap.plugins.intermediates
+
+.. automodule:: rbfenetmap.plugins.intermediates.fragment_swap

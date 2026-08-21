@@ -201,7 +201,7 @@ concerns reaching back into the core:
 - `json` — the round-trippable native format, including rejected candidates.
 - `edgelist`, `graphml`, `html` (a self-contained report with depictions).
 
-Adding your own is a `PluginSpec` plus a class implementing one of the four ABCs in
+Adding your own is a `PluginSpec` plus a class implementing one of the five ABCs in
 `rbfenetmap.core.meta`. Registration is metadata only — nothing is imported until the
 plugin is actually used, which is why `rbfenet plugins --all` can report on backends that
 are not installed.

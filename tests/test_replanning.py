@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from rbfenetmap.core.diagnostics import (
+from rbfenetmap.core.replanning import (
     cycle_closure_errors,
     load_edge_lmi,
     lmi_threshold,

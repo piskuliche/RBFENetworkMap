@@ -47,7 +47,7 @@ Surgery and diagnostics
 
 .. automodule:: rbfenetmap.core.surgery
 
-.. automodule:: rbfenetmap.core.diagnostics
+.. automodule:: rbfenetmap.core.replanning
 
 Plugin registry
 ---------------

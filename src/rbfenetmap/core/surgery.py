@@ -253,7 +253,7 @@ def delete_edge(network: Network, pair: str | tuple[str, str], *, must_stay_conn
     -----
     This is the failure path of a campaign: an edge whose λ windows will not converge, or
     whose setup turns out to be wrong. Deleting it does not re-plan -- see
-    :func:`rbfenetmap.core.diagnostics.replan_after_diagnostics` for the version that
+    :func:`rbfenetmap.core.replanning.replan_after_diagnostics` for the version that
     refills the gap from the candidate pool.
     """
     key = _pair(pair)

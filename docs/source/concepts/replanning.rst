@@ -89,7 +89,7 @@ Diagnostics-driven replanning
 -----------------------------
 
 An RBFE campaign is a loop -- plan, run, analyse, replan --  and
-:mod:`rbfenetmap.core.diagnostics` is the return leg.
+:mod:`rbfenetmap.core.replanning` is the return leg.
 
 ``edgembar`` fits the whole network at once under the constraint that every cycle closes.
 Each edge's Lagrange multiplier records how hard that constraint had to pull on it, and a
@@ -147,14 +147,14 @@ in the network" is logged, because it is worth reading.
    replacing. Do not use it, and do not report it, as a route to better agreement with
    experiment.
 
-:func:`~rbfenetmap.core.diagnostics.cycle_closure_errors` is provided so that claim is
+:func:`~rbfenetmap.core.replanning.cycle_closure_errors` is provided so that claim is
 checkable on your own data rather than merely asserted: sum your computed ΔΔG around each
 basis cycle before and after, and compare the change there against the change in MUE.
 
 The ingestion format
 ~~~~~~~~~~~~~~~~~~~~
 
-:func:`~rbfenetmap.core.diagnostics.load_edge_lmi` reads a small JSON document of this
+:func:`~rbfenetmap.core.replanning.load_edge_lmi` reads a small JSON document of this
 package's own:
 
 .. code-block:: json

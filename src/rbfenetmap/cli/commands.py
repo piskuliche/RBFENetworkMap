@@ -430,7 +430,7 @@ def cmd_replan(args: argparse.Namespace) -> int:
     options block does not persist ``banned_edges``: without the printout the fact that
     anything was pruned would survive only in this terminal.
     """
-    from rbfenetmap.core.diagnostics import load_edge_lmi, replan_after_diagnostics
+    from rbfenetmap.core.replanning import load_edge_lmi, replan_after_diagnostics
     from rbfenetmap.io.networkio import dump_network, load_network
 
     network = load_network(Path(args.network))

@@ -89,7 +89,8 @@ from rbfenetmap.core.options import NetworkOptions
 # selection -- collapse a pair to its cheapest orientation, orient a chosen edge, explain a
 # disconnection -- and two planners that described a disconnection differently would be a
 # worse outcome than reaching across a leading underscore inside one plugin package.
-from rbfenetmap.plugins.planners.mst_planner import _best_by_pair, _describe_disconnection, _orient
+from rbfenetmap.core.models import orient_edge
+from rbfenetmap.plugins.planners.mst_planner import _best_by_pair, _describe_disconnection
 
 __all__ = ("OptimalDesignPlanner", "minimum_edge_count")
 
@@ -176,7 +177,7 @@ class OptimalDesignPlanner(AbstractNetworkPlanner):
         self._report_degrees(graph, selected, options, unmet)
         logger.info("%s", self.describe_design(graph, names, selected, options))
 
-        edges = tuple(_orient(feasible[pair], ligands, options.edge_direction) for pair in sorted(selected))
+        edges = tuple(orient_edge(feasible[pair], ligands, options.edge_direction) for pair in sorted(selected))
         network = Network(
             ligands=ligands,
             edges=edges,

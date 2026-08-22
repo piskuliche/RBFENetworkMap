@@ -270,6 +270,8 @@ class AmberExporter(AbstractExporter):
                 "predicted_sigma_kcal": round(float(sigma), 4),
             }
         return allocation
+
+    @staticmethod
     def _write_structures(network: Network, destination: Path) -> list[Path]:
         """Write one SDF per ligand, plus the manifest of the invented ones.
 

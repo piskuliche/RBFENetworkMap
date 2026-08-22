@@ -241,6 +241,18 @@ _NETWORK_DESTS = {
     "cbfe_mode": "cbfe",
     "cbfe_base_cost": "cbfe_base_cost",
     "cbfe_atom_weight": "cbfe_atom_weight",
+    # Phase 2
+    "cluster_by": "cluster_by",
+    "cluster_bridges": "cluster_bridges",
+    # Phase 3
+    "design": "design",
+    "design_refine": "design_refine",
+    "design_candidate_factor": "design_candidate_factor",
+    "design_total_ns": "design_total_ns",
+    "design_lambda_min": "design_lambda_min",
+    "design_lambda_max": "design_lambda_max",
+    # Phase 4b
+    "intermediates": "intermediates",
 }
 
 
@@ -305,6 +317,12 @@ class TestPinnedSurface:
             if dest == "allow_disconnected":  # the CLI states the negation
                 expected = not expected
             actual = getattr(pinned, field_name)
+            if field_name == "intermediates":
+                # Not a like-for-like comparison: --intermediates carries only the mode,
+                # while the dataclass field is the whole nested policy. Comparing the mode
+                # is the equivalent check, and the rest of that policy is covered by
+                # test_every_algorithmic_network_option_is_pinned.
+                actual = actual.mode
             if actual != expected:
                 disagreements[field_name] = (actual, expected)
         assert not disagreements

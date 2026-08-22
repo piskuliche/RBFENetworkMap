@@ -800,18 +800,19 @@ Knob precedence
      - ``cbfe_mode``
      - Widens the pool rather than steering selection. Applied *before* cost competition,
        so it can rescue (3) without ever displacing a feasible RBFE edge.
-   * - 9
+   * - 10
      - ``cluster_by``, ``cluster_bridges``
      - Narrows the pool, before everything above except (1) and (2): cross-cluster
        candidates are pruned to ``cluster_bridges`` per joined cluster pair. Never at the
        expense of (3) -- a crossing needed to span the ligands is restored and reported.
+   * - 11
      - ``design``
      - Replaces the *objective* of (5) rather than competing with it, and only under the
        ``optimal`` planner. (1) to (4) still bind: banned edges stay out, forced edges stay
        in, the network still spans, and ``n_edges`` still caps. What changes is what fills
        the remaining budget -- the criterion instead of cost and degree targets -- so
        ``edges_per_ligand`` and ``min_cycle_coverage`` drop to reporting only.
-   * - 10
+   * - 12
      - ``design_total_ns``
      - Not a selection knob at all. Applied after planning, at export, over whatever edges
        were chosen; it changes how the network is run, never which network it is.

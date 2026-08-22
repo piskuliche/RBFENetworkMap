@@ -46,11 +46,14 @@ Diagnostics and cost
 .. automodule:: rbfenetmap.core.diagnostics
 
 .. automodule:: rbfenetmap.core.cost
+
 .. automodule:: rbfenetmap.core.clustering
+
 Optimal design
 --------------
 
 .. automodule:: rbfenetmap.core.design
+
 .. automodule:: rbfenetmap.core.consistency
 
 Surgery and diagnostics
@@ -59,6 +62,7 @@ Surgery and diagnostics
 .. automodule:: rbfenetmap.core.surgery
 
 .. automodule:: rbfenetmap.core.replanning
+
 Intermediate ligands
 --------------------
 

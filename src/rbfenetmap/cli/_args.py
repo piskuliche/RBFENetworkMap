@@ -672,6 +672,8 @@ def add_network_arguments(parser: argparse.ArgumentParser) -> None:
         default=24,
         metavar="N",
         help="Most lambda windows the allocation may assign to an edge (default: %(default)s).",
+    )
+    group.add_argument(
         "--intermediates",
         choices=("off", "bridge", "gaps"),
         default="off",

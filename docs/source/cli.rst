@@ -59,9 +59,6 @@ clusters instead:
 To select edges by a statistical criterion rather than by cost, use the ``optimal`` planner
 with the ``variance`` scorer -- the one scorer whose totals are predicted standard
 deviations in kcal/mol, which is the scale the criterion is built on:
-To try inventing a bridging ligand *before* falling back to counterpoised edges, add
-``--intermediates``:
-
 .. code-block:: bash
 
    rbfenet plan --ligands ligands.sdf \
@@ -73,6 +70,14 @@ Each cluster is planned as its own subnetwork and joined to the others by
 ``--cluster-bridges`` edges per joined cluster pair; the default of two puts each crossing
 on a cycle. See :doc:`concepts/network_selection` for why the saving is real and what
 happens when a partition would disconnect the network.
+
+To select the design by an optimality criterion and allocate a simulation budget across it,
+pair ``--planner optimal`` with the ``variance`` scorer -- the one scorer whose totals are
+predicted standard deviations in kcal/mol, the scale the criterion is built on:
+
+.. code-block:: bash
+
+   rbfenet plan --ligands ligands.sdf \
                 --scorer variance --planner optimal --design d_optimal \
                 --design-total-ns 500 \
                 --out network.json --export amber --export-dir ./out
@@ -91,6 +96,13 @@ nanosecond allocation, bounded by ``--design-lambda-min`` / ``--design-lambda-ma
 ``--design-refine`` adds a Fedorov exchange pass. See
 :doc:`concepts/network_selection` -- including the warning that optimal design buys
 precision and does not promise accuracy.
+
+To try inventing a bridging ligand *before* falling back to counterpoised edges, combine
+``--intermediates`` with ``--cbfe``:
+
+.. code-block:: bash
+
+   rbfenet plan --ligands ligands.sdf \
                 --intermediates bridge --cbfe bridge \
                 --out network.json
 

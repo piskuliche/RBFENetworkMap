@@ -1066,12 +1066,6 @@ def build_network(
     logger.info("Evaluating %d candidate pair(s) with mapper %r", len(pairs), mapper_obj.name)
 
     if network_options.pair_evaluation == "adaptive" and planner_obj.name == "mst":
-        return maybe_apply_graph_consistency(
-            evaluate_pairs_adaptively(
-                ligands, pairs, mapper_obj, scorer_obj, planner_obj, mapping_options, network_options
-            ),
-            network_options,
-            scorer=scorer_obj,
         # The pool, not the plan: generation runs once after the loop settles, never
         # inside it. Generating mid-loop would satisfy connectivity with synthetic nodes
         # and stop the very RBFE expansion the loop exists to drive -- the same rationale
@@ -1086,12 +1080,14 @@ def build_network(
         n_feasible = sum(1 for c in candidates if c.feasible)
         logger.info("%d of %d candidate(s) are feasible", n_feasible, len(candidates))
 
-    candidates = evaluate_pairs(ligands, pairs, mapper_obj, scorer_obj, mapping_options, network_options)
-    n_feasible = sum(1 for c in candidates if c.feasible)
-    logger.info("%d of %d candidate(s) are feasible", n_feasible, len(candidates))
-
+    # Phase 4b collapsed three exits into one, so the graph-consistency gate that Phase 5
+    # had to repeat at each of them is applied here exactly once. That is what Phase 5's
+    # docstring asks for -- "a single gate, called on every path out of the pipeline" --
+    # now guaranteed by the control flow rather than maintained by hand.
     return maybe_apply_graph_consistency(
-        planner_obj.plan(ligands, candidates, network_options), network_options, scorer=scorer_obj
-    return _plan_over_augmented_pool(
-        ligands, candidates, mapper_obj, scorer_obj, planner_obj, mapping_options, network_options
+        _plan_over_augmented_pool(
+            ligands, candidates, mapper_obj, scorer_obj, planner_obj, mapping_options, network_options
+        ),
+        network_options,
+        scorer=scorer_obj,
     )

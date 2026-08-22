@@ -779,8 +779,10 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
         edge_mode = options.cycle_coverage_mode == "edge"
         covered = covered_edges if edge_mode else covered_nodes
 
-        total = graph.number_of_nodes()
-        if total < 3:
+        # Real ligands only (Phase 4b): an intermediate is scaffolding, and the user asked
+        # for coverage of the compounds whose affinity they care about. Used by the node
+        # branch only -- the edge branch counts selected edges, and every selected edge is
+        # a simulation someone will run, including the ones incident to a synthetic vertex.
         total = graph.number_of_nodes() - len(synthetic)
         if graph.number_of_nodes() < 3:
             return selected  # a cycle needs three vertices

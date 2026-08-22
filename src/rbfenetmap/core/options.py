@@ -630,6 +630,7 @@ class NetworkOptions:
             raise ValueError(
                 "cluster_bridges must be at least 1: joining two clusters takes an edge. Use "
                 "cluster_by='none' to plan the ligands as a single set."
+            )
         if self.design not in DESIGN_CRITERIA:
             raise ValueError(f"design must be one of {list(DESIGN_CRITERIA)}; got {self.design!r}.")
         if self.design_candidate_factor < 1.0:
@@ -644,6 +645,7 @@ class NetworkOptions:
         if self.design_lambda_max < self.design_lambda_min:
             raise ValueError(
                 f"design_lambda_max={self.design_lambda_max} is below design_lambda_min={self.design_lambda_min}."
+            )
         if self.intermediates.mode not in INTERMEDIATE_MODES:
             raise ValueError(
                 f"intermediates.mode must be one of {list(INTERMEDIATE_MODES)}; got {self.intermediates.mode!r}."

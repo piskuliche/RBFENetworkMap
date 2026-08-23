@@ -479,19 +479,54 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
         if target is None:  # pragma: no cover - the caller only enters this pass when it is set
             return selected
 
-        def diameter_of(current: set[tuple[str, str]]) -> int | None:
-            """Diameter of the selected subgraph, or ``None`` if it is disconnected."""
+        def _subgraph(current: set[tuple[str, str]]) -> nx.Graph:
             subgraph: nx.Graph = nx.Graph()
             subgraph.add_nodes_from(graph.nodes)
             subgraph.add_edges_from(current)
+            return subgraph
+
+        def far_pairs(current: set[tuple[str, str]]) -> int | None:
+            """How many ligand pairs sit further apart than *target*.
+
+            **This, not the diameter itself, is what the search descends on**, and the
+            distinction is the whole correctness of the pass. The diameter is a maximum
+            over all pairs, so it only falls when the *last* offending pair is fixed. On a
+            real series no single shortcut does that -- one edge relieves one long path and
+            leaves another pair still too far apart -- so a greedy that requires each edge
+            to reduce the maximum accepts nothing, stops immediately, and reports that the
+            pool has nothing to sell. It has: it just has nothing that helps *alone*.
+
+            Counting the offending pairs makes every useful edge visibly useful, so the
+            search can descend through the plateau the maximum hides. On the shipped
+            example this is the difference between the bound being unreachable and being
+            met by two edges.
+            """
+            subgraph = _subgraph(current)
+            if subgraph.number_of_nodes() < 2:
+                return 0
+            if not nx.is_connected(subgraph):
+                return None
+            return (
+                sum(
+                    1
+                    for _, lengths in nx.all_pairs_shortest_path_length(subgraph)
+                    for distance in lengths.values()
+                    if distance > target
+                )
+                // 2
+            )
+
+        def diameter_of(current: set[tuple[str, str]]) -> int | None:
+            """Diameter of the selected subgraph, or ``None`` if it is disconnected."""
+            subgraph = _subgraph(current)
             if subgraph.number_of_nodes() < 2:
                 return 0
             if not nx.is_connected(subgraph):
                 return None
             return int(nx.diameter(subgraph, usebounds=True))
 
-        current = diameter_of(selected)
-        if current is None:
+        remaining = far_pairs(selected)
+        if remaining is None:
             # Diameter is undefined across components. Reporting that plainly beats
             # reporting an unmet bound, which would send the reader after the wrong knob:
             # the network is disconnected, which is the larger problem.
@@ -501,35 +536,36 @@ class MSTRedundancyPlanner(AbstractNetworkPlanner):
             )
             return selected
 
-        while current > target:
+        while remaining > 0:
             if options.n_edges is not None and len(selected) >= options.n_edges:
                 break
             best: tuple[float, int, float, tuple[str, str]] | None = None
             for pair in available:
                 if pair in selected:
                     continue
-                reduced = diameter_of(selected | {pair})
-                if reduced is None or reduced >= current:
+                after = far_pairs(selected | {pair})
+                if after is None or after >= remaining:
                     continue
                 cost = float(graph.edges[pair]["weight"])
-                reduction = current - reduced
-                # Reduction per unit cost first, then raw reduction, then price. Ranking on
-                # raw reduction alone would happily pay a rescue-priced edge to save the
-                # same hop a cheap one saves.
-                key = (-reduction / max(cost, _COST_FLOOR), -reduction, cost, pair)
+                relieved = remaining - after
+                # Pairs relieved per unit cost first, then raw count, then price. Ranking
+                # on the raw count alone would happily pay a rescue-priced edge to relieve
+                # the same pairs a cheap one relieves.
+                key = (-relieved / max(cost, _COST_FLOOR), -relieved, cost, pair)
                 if best is None or key < best:
                     best = key
             if best is None:
                 break
             selected.add(best[-1])
-            current = diameter_of(selected)
-            if current is None:  # pragma: no cover - adding an edge cannot disconnect
+            remaining = far_pairs(selected)
+            if remaining is None:  # pragma: no cover - adding an edge cannot disconnect
                 break
 
-        if current is not None and current > target:
+        achieved = diameter_of(selected)
+        if achieved is not None and achieved > target:
             message = (
-                f"max_diameter={target} unmet; achieved {current}. The candidate pool has no "
-                "further edge that would shorten the network."
+                f"max_diameter={target} unmet; achieved {achieved}. The candidate pool has no "
+                "further edge that would bring another ligand pair within the bound."
             )
             unmet.append(message)
             warnings.warn(message, stacklevel=4)

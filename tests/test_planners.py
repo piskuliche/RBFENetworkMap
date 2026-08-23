@@ -449,6 +449,61 @@ class TestDiameterBound:
         network = self._plan(path_ligands, path_candidates, max_diameter=2, n_edges=5)
         assert len(network.edges) == 5
 
+    @pytest.fixture
+    def spider(self, benzamides):
+        """A hub with four two-hop arms: cheap ``hub-p`` and ``p-leaf``, everything else dear.
+
+        The shape the path-graph cases above cannot express, and the shape a real congeneric
+        series actually has -- the shipped nine-ligand example is a degree-six hub with
+        pendant pairs hanging off it.
+
+        Its diameter is a maximum over *six* equally-long leaf-to-leaf pairs, so no single
+        shortcut lowers it: relieve one pair and five are still four hops apart. Four
+        ``hub-leaf`` edges lower it to two. A greedy that requires each edge to reduce the
+        maximum sees a plateau and stops; one that counts offending pairs walks down it.
+        """
+        from dataclasses import replace
+
+        source = benzamides["bza_H"]
+        names = [f"lig_{i}" for i in range(9)]
+        ligands = {name: replace(source, name=name) for name in names}
+
+        hub, rest = names[0], names[1:]
+        arms = [(rest[i], rest[i + 1]) for i in range(0, 8, 2)]
+        candidates = [make_transformation(hub, near, cost=1.0) for near, _ in arms]
+        candidates += [make_transformation(near, leaf, cost=1.0) for near, leaf in arms]
+        cheap = {c.unordered_key for c in candidates}
+        for i, a in enumerate(names):
+            for b in names[i + 1 :]:
+                if tuple(sorted((a, b))) not in cheap:
+                    candidates.append(make_transformation(a, b, cost=50.0))
+        return ligands, candidates
+
+    def test_a_plateau_the_maximum_hides_is_still_descended(self, spider):
+        """The regression: the bound is reachable, and no single edge gets closer to it.
+
+        Before this pass descended on the far-pair count, it asked each candidate to reduce
+        the *diameter*, found none that did, and reported that the pool had nothing left to
+        sell -- while the pool in fact held the edges that meet the bound. A knob that
+        reports an unreachable target on a reachable one is precisely the failure mode this
+        epic exists to remove, so it is pinned here rather than left to a fixture that
+        happens not to provoke it.
+        """
+        ligands, candidates = spider
+        before = self._plan(ligands, candidates)
+        graph = _graph_of(before)
+        assert nx.diameter(graph) > 2
+
+        selected = {tuple(sorted(e)) for e in graph.edges}
+        every = {c.unordered_key for c in candidates}
+        assert not any(
+            nx.diameter(nx.Graph(list(selected | {pair}))) < nx.diameter(graph) for pair in every - selected
+        ), "fixture no longer poses the plateau this test exists for"
+
+        after = self._plan(ligands, candidates, max_diameter=2)
+        assert nx.diameter(_graph_of(after)) <= 2
+        assert after.unmet_constraints == ()
+
 
 class TestCycleCoverageMode:
     """``node`` counts ligands on a cycle; ``edge`` counts edges, i.e. 2-edge-connectivity."""

@@ -4,9 +4,12 @@ Everything is inlined -- SVG, CSS, no scripts, no external assets -- so the file
 emailed, attached to a ticket, or opened from a scratch directory years later and still
 render. That constraint is why the depictions are SVG rather than linked images.
 
-The report includes the rejected candidates. A reviewer's first question about a planned
-network is almost always "why isn't ligand X connected to Y", and the answer only exists
-in the rejections.
+The report includes the rejected candidates, and *draws* them. A reviewer's first question
+about a planned network is almost always "why isn't ligand X connected to Y", and the
+answer only exists in the rejections -- where a reason string alone rarely settles it. The
+mapping that provoked the rejection is already on the candidate, so the same two-pane
+depiction the selected edges get is available at no extra computation, and shows the
+oversized soft-core or the split ring directly.
 """
 
 from __future__ import annotations
@@ -64,6 +67,10 @@ th { font-weight: 600; }
 .node-marker { display: inline-block; width: .8rem; height: .8rem; border-radius: 50%;
                border: 2px dashed #22384f; vertical-align: -1px; margin-right: .3rem; }
 .warn { border-left: 3px solid #e08a3c; padding-left: .8rem; }
+.edge.rejected { border-color: #c2553d66; }
+.badge.rej { border-color: #c2553d; color: #c2553d; font-family: ui-monospace, monospace;
+             text-transform: none; letter-spacing: 0; }
+.no-draw { font-size: .9rem; opacity: .85; font-style: italic; padding: .5rem 0; }
 """
 
 
@@ -75,6 +82,15 @@ def _escape(value: object) -> str:
 def _edge_anchor(key: str) -> str:
     """Return a stable fragment id for one edge section."""
     return f"edge-{key}"
+
+
+def _reject_anchor(key: str) -> str:
+    """Return a stable fragment id for one rejected-candidate card.
+
+    Kept distinct from :func:`_edge_anchor` so a pair that is both selected in one report
+    and rejected in another never collides when the two are diffed.
+    """
+    return f"reject-{key}"
 
 
 def _badge(edge: "Transformation") -> str:
@@ -110,6 +126,23 @@ def _synthetic_badge(edge: "Transformation", network: "Network") -> str:
     return f"<span class='badge syn' title='invented: {_escape(', '.join(invented))}'>SYN</span>"
 
 
+def _rejection_badges(candidate: "Transformation") -> str:
+    """Return one badge per reason this candidate was rejected."""
+    return "".join(f"<span class='badge rej'>{_escape(r.value)}</span>" for r in candidate.score.rejections)
+
+
+def _has_common_core(candidate: "Transformation") -> bool:
+    """Whether the mapper related the two ligands at all.
+
+    A candidate rejected as ``mapper_failed`` or ``no_common_core`` still has a complete
+    partition -- ``AtomMapping`` requires every atom to hold a role, so an empty core puts
+    *every* atom in the soft-core. It therefore draws perfectly well, as two entirely warm
+    molecules. That picture is honest but easy to misread as a rendering fault, so the
+    card says what it is looking at rather than suppressing it.
+    """
+    return bool(candidate.mapping.cc1)
+
+
 def _edge_summary(edge: "Transformation") -> str:
     """Describe an edge's atom partition in the terms its kind actually uses.
 
@@ -124,6 +157,12 @@ def _edge_summary(edge: "Transformation") -> str:
         f"common core {edge.mapping.n_common_core}"
     )
 
+
+#: How many rejected candidates are drawn before the report stops and says how many it
+#: left out. Chosen to cover the whole rejection list of a healthy run -- a well-posed
+#: series rejects a handful -- while refusing to inline hundreds of SVGs when a threshold
+#: is set so tight that nothing passes.
+DEFAULT_MAX_REJECT_DEPICTIONS = 24
 
 #: The seed the report's robustness estimate is run with. Fixed rather than exposed: two
 #: renders of the same network file have to produce the same document, or the HTML report
@@ -170,7 +209,14 @@ def _diagnostics_section(network: "Network") -> list[str]:
     return parts
 
 
-def render_report(network: "Network", *, title: str = "RBFE network", show_indices: bool = False) -> str:
+def render_report(
+    network: "Network",
+    *,
+    title: str = "RBFE network",
+    show_indices: bool = False,
+    reject_depictions: bool = True,
+    max_reject_depictions: int = DEFAULT_MAX_REJECT_DEPICTIONS,
+) -> str:
     """Return a complete, self-contained HTML document describing *network*.
 
     Parameters
@@ -179,6 +225,15 @@ def render_report(network: "Network", *, title: str = "RBFE network", show_indic
     title : str, optional
     show_indices : bool, optional
         Label atoms with indices in the depictions.
+    reject_depictions : bool, optional
+        Draw each rejected candidate as well as tabulating it. On by default: the picture
+        is the reason the section exists. Turn it off for a small report.
+    max_reject_depictions : int, optional
+        Stop after this many rejected depictions. A tightened threshold can reject every
+        pair in the pool -- 120 of them on a 16-ligand set -- and two SVGs each would take
+        the report from under 2 MB to over 10. The number omitted is always stated; a
+        report that silently drew some of the rejections would be worse than one that drew
+        none. Zero or negative means no limit.
 
     Returns
     -------
@@ -328,14 +383,52 @@ def render_report(network: "Network", *, title: str = "RBFE network", show_indic
             "<div class='scroll'><table><thead><tr><th>Edge</th><th>Reason(s)</th>"
             "<th>Soft-core</th><th>Regions before</th></tr></thead><tbody>",
         ]
-        for candidate in sorted(rejected, key=lambda c: c.key):
+        ordered = sorted(rejected, key=lambda c: c.key)
+        drawn = ordered if max_reject_depictions <= 0 else ordered[:max_reject_depictions]
+        drawable = {c.key for c in drawn} if reject_depictions else set()
+        for candidate in ordered:
             reasons = ", ".join(r.value for r in candidate.score.rejections)
+            label = _escape(candidate.key)
+            if candidate.key in drawable:
+                label = f"<a href='#{_reject_anchor(candidate.key)}'>{label}</a>"
             parts.append(
-                f"<tr><td>{_escape(candidate.key)}</td><td>{_escape(reasons)}</td>"
+                f"<tr><td>{label}</td><td>{_escape(reasons)}</td>"
                 f"<td>{candidate.mapping.n_softcore_1}/{candidate.mapping.n_softcore_2}</td>"
                 f"<td>{_escape(candidate.repair.n_fragments_before)}</td></tr>"
             )
         parts.append("</tbody></table></div>")
+
+        if reject_depictions:
+            omitted = len(ordered) - len(drawn)
+            parts.append(
+                "<p class='meta'>Each rejected pair is drawn below with the mapping that provoked the "
+                "rejection, in the same colours as the selected edges &mdash; so an oversized soft-core or "
+                "a ring left half-transformed is visible rather than merely named.</p>"
+            )
+            if omitted:
+                parts.append(
+                    f"<div class='warn'>Drawing the first {len(drawn)} of {len(ordered)} rejected "
+                    f"candidates; <strong>{omitted}</strong> not shown. Raise the limit with "
+                    f"<code>--exporter-opt max_reject_depictions=N</code> (0 for all), or turn the "
+                    f"depictions off with <code>--exporter-opt reject_depictions=false</code>.</div>"
+                )
+            for candidate in drawn:
+                parts += [
+                    f"<div class='edge rejected' id='{_reject_anchor(candidate.key)}'>",
+                    f"<h3>{_escape(candidate.key)}{_rejection_badges(candidate)}</h3>",
+                    f"<div class='meta'>{_edge_summary(candidate)} &middot; "
+                    f"mapper {_escape(candidate.mapping.method)}</div>",
+                ]
+                if not _has_common_core(candidate):
+                    parts.append(
+                        "<div class='no-draw'>No common core was found, so both molecules are drawn "
+                        "entirely soft-core. That is the rejection itself, not a drawing fault.</div>"
+                    )
+                source_svg, target_svg = render_edge_svg(candidate, network.ligands, show_indices=show_indices)
+                parts.append(f"<div class='panes scroll'>{source_svg}{target_svg}</div>")
+                if candidate.repair.trace:
+                    parts.append(f"<div class='trace'>{_escape(chr(10).join(candidate.repair.trace))}</div>")
+                parts.append("</div>")
 
     parts.append("</body></html>")
     return "".join(parts)

@@ -20,6 +20,8 @@ examples/data/benzamides.sdf
 # Example and CLI output.
 network.json
 network.html
+# ...except the published Tyk2 variant matrix, which is a docs asset and not output.
+!docs/source/_static/tyk2-matrix/**/network.html
 amber_out/
 unprot_report/
 

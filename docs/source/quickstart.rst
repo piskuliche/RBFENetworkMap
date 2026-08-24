@@ -14,11 +14,16 @@ Core dependencies are only ``rdkit``, ``networkx``, ``numpy``, and ``scipy``. Th
 Example data
 ------------
 
-No binary files are checked in. Regenerate the example ligands from their SMILES:
+No binary files are checked in. Regenerate the benzamide example ligands from their
+SMILES:
 
 .. code-block:: bash
 
    python examples/data/make_conformers.py
+
+The 16-ligand Tyk2 series used by :doc:`variant_matrix` is checked in directly, as
+co-posed mol2 under ``examples/data/tyk2/``, because the comparison it supports is only
+meaningful on a real, consistently posed set.
 
 Plan a network
 --------------

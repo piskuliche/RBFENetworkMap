@@ -71,6 +71,17 @@ file in `ligands/` — and the test that asserts it.
 **`examples/data/benzamides.sdf` is gitignored**; regenerate it with
 `python examples/data/make_conformers.py`.
 
+**The Tyk2 variant matrix is a checked-in docs asset, not output.**
+`docs/source/_static/tyk2-matrix/` holds 21 self-contained planning reports (67 MB) that
+`html_static_path` publishes verbatim. `.gitignore` ignores `network.html` at any depth, so
+that tree only stays in git because of an explicit negation — if you move or rename the
+directory, move the negation with it or the reports silently vanish from the next commit.
+Regenerate the whole tree, index included, with
+`python examples/06_variant_matrix.py docs/source/_static/tyk2-matrix`; planning is
+deterministic, so a regenerated report that differs is a real behaviour change, and the page
+is the cheapest regression signal in the repo. `examples/data/tyk2/matrix-pre-repair.json` is a
+frozen pre-#42 baseline that cannot be regenerated — don't "refresh" it.
+
 ## Working agreements
 
 Non-trivial work goes issue → `feature/<topic>` or `fix/<topic>` branch → PR. Commit subjects

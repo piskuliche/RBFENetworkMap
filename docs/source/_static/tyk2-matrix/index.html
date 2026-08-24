@@ -1,0 +1,505 @@
+<title>Tyk2 Network Variants</title>
+<style>
+:root{--bg:#fff;--fg:#16181d;--muted:#5b6472;--line:#e3e6eb;--accent:#1b5e9c;
+--warn:#8a5a00;--warnbg:#fdf6e3;--good:#1f6b3a;--card:#f7f8fa;}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#14161a;--fg:#e8eaed;
+--muted:#9aa3b0;--line:#2b2f36;--accent:#6fb3ea;--warn:#e0b050;--warnbg:#2a2415;
+--good:#6cc48d;--card:#1c1f25;}}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);margin:0;padding:2.5rem 1.5rem 5rem;
+font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;}
+.wrap{max-width:1180px;margin:0 auto}
+h1{font-size:1.9rem;margin:0 0 .3rem;letter-spacing:-.02em}
+h2{font-size:1.25rem;margin:2.8rem 0 .8rem;padding-bottom:.35rem;border-bottom:2px solid var(--line)}
+h3{font-size:1rem;margin:1.6rem 0 .5rem}
+.sub{color:var(--muted);margin:0 0 1.6rem}
+.scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;border:1px solid var(--line);border-radius:8px}
+table{border-collapse:collapse;width:100%;font-size:.86rem;min-width:900px}
+th,td{padding:.5rem .6rem;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+th{background:var(--card);font-weight:600;position:sticky;top:0}
+td.l,th.l{text-align:left}
+tbody tr:hover{background:var(--card)}
+.sec td{background:var(--card);font-weight:700;text-align:left;color:var(--accent);
+font-size:.78rem;letter-spacing:.06em;text-transform:uppercase}
+a{color:var(--accent)}
+code{background:var(--card);padding:.1em .35em;border-radius:4px;font-size:.88em}
+.note{background:var(--warnbg);border-left:3px solid var(--warn);padding:.9rem 1.1rem;
+border-radius:0 6px 6px 0;margin:1.2rem 0}
+.note strong{color:var(--warn)}
+.below{color:var(--warn);font-weight:600}
+.ok{color:var(--good)}
+.legend{color:var(--muted);font-size:.85rem;margin-top:.7rem}
+.legend dt{font-weight:600;color:var(--fg);float:left;clear:left;margin-right:.5em}
+.legend dd{margin:0 0 .2rem}
+td.l{white-space:normal;min-width:290px;max-width:340px}
+.flags{color:var(--muted);font-size:.82em;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.why{color:var(--muted);font-size:.82em;display:block;margin-top:.25rem;line-height:1.4}
+.knobs{margin:1rem 0 0}
+.knobs dt{font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.86rem;margin-top:.7rem}
+.knobs dd{margin:.1rem 0 0;color:var(--muted);font-size:.9rem}
+.tool{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:.9rem 1.1rem;margin:0 0 1.4rem;font-size:.92rem}
+.meta{color:var(--muted);font-size:.88rem}
+</style>
+<div class="wrap">
+<h1>Tyk2 RBFE network variants</h1>
+<p class="sub">16 ligands &middot; every pair feasible &middot; one connected component.
+Every row is a real planning run; click a variant for its full report.</p>
+
+<div class="tool">
+Planned with <strong>rbfe-network-map</strong> (<code>rbfenetmap</code>). Every row is one
+<code>rbfenet plan</code> invocation over the same 16 input structures, shipped in
+<code>examples/data/tyk2/</code>; the flags shown are the only difference between them.
+Regenerate the whole page with
+<code>python examples/06_variant_matrix.py docs/source/_static/tyk2-matrix</code>.
+</div>
+
+<div class="note">
+<strong>Optimal design buys precision, not accuracy.</strong> The two optimal-design rows below
+implement <strong>NetBFE</strong> &mdash; a published method by Li et&nbsp;al., not part of this
+package and not a mode of it. In that paper <code>tr(C)</code> fell monotonically
+(1.08&nbsp;&rarr;&nbsp;0.78) as the design was optimised while RMSE against experiment
+<em>rose</em> (0.84&nbsp;&rarr;&nbsp;0.91), measured on <strong>16 TYK2 inhibitors</strong> &mdash;
+almost certainly this same <code>ejm*</code>/<code>jmc*</code> series. Minimising predicted
+variance does not make the underlying free energies more correct.
+<p style="margin:.7rem 0 0">Note also that the published method is <em>iterative</em>:
+it re-optimises allocation each round from variances measured in the previous one. The rows here
+are the static first pass, with no MD round trip behind them.</p>
+<p style="margin:.7rem 0 0;font-size:.86rem">Li, P.; Li, Z.; Wang, Y.; Dou, H.; Radak, B.&nbsp;K.;
+Allen, B.&nbsp;K.; Sherman, W.; Xu, H. &ldquo;Precise Binding Free Energy Calculations for Multiple
+Molecules Using an Optimal Measurement Network of Pairwise Differences.&rdquo;
+<em>J.&nbsp;Chem.&nbsp;Theory Comput.</em> <strong>2022</strong>, <em>18</em>(2), 650&ndash;663.
+<a href="https://doi.org/10.1021/acs.jctc.1c00703">doi:10.1021/acs.jctc.1c00703</a></p>
+</div>
+
+<div class="scroll"><table><thead><tr>
+<th class="l">variant</th><th>edges</th><th>vs floor</th><th>cost</th><th>GPU&nbsp;h</th>
+<th>deg min/mean/max</th><th>diam</th><th>cycles&nbsp;&le;4</th><th>bridges</th>
+<th>edge&nbsp;cyc&nbsp;cov</th><th>non&#8209;uniform&nbsp;SC</th><th>rejected</th><th>CBFE</th><th>robust</th>
+</tr></thead><tbody>
+<tr class="sec"><td colspan="14">Topology</td></tr><tr>
+<td class="l"><a href="mst-default/network.html">mst-default</a><br><span class="flags">(defaults)</span>
+<br><span class="why">The shipped default. Minimum spanning tree, then edges added until every ligand has 2. Everything else is compared to this.</span></td>
+<td>20</td><td><span class="below">&minus;25</span></td>
+<td>20.00</td><td>79</td>
+<td>2/2.5/4</td>
+<td>7</td>
+<td>4</td>
+<td>3</td>
+<td>85%</td>
+<td>8</td>
+<td>&mdash;</td>
+<td>&mdash;</td>
+<td>0.77</td>
+</tr><tr>
+<td class="l"><a href="mst-epl3/network.html">mst-epl3</a><br><span class="flags">--edges-per-ligand 3</span>
+<br><span class="why">Raise the per-ligand degree target to 3. More edges, more redundancy, more GPU time.</span></td>
+<td>26</td><td><span class="below">&minus;19</span></td>
+<td>28.62</td><td>103</td>
+<td>3/3.2/5</td>
+<td>6</td>
+<td>16</td>
+<td>0</td>
+<td>100%</td>
+<td>8</td>
+<td>&mdash;</td>
+<td>&mdash;</td>
+<td>0.98</td>
+</tr><tr>
+<td class="l"><a href="mst-epl4/network.html">mst-epl4</a><br><span class="flags">--edges-per-ligand 4</span>
+<br><span class="why">Degree target 4. Approaching the n&middot;ln(n) floor by brute force.</span></td>
+<td>32</td><td><span class="below">&minus;13</span></td>
+<td>38.03</td><td>127</td>
+<td>4/4.0/4</td>
+<td>4</td>
+<td>41</td>
+<td>0</td>
+<td>100%</td>
+<td>8</td>
+<td>&mdash;</td>
+<td>&mdash;</td>
+<td>0.99</td>
+</tr><tr>
+<td class="l"><a href="rmst-n2/network.html">rmst-n2</a><br><span class="flags">--planner redundant-mst --n-redundancy 2</span>
+<br><span class="why">Overlay 2 spanning trees before adding degree redundancy. A different route to redundancy than raising degree.</span></td>
+<td>30</td><td><span class="below">&minus;15</span></td>
+<td>30.37</td><td>119</td>
+<td>2/3.8/6</td>
+<td>6</td>
+<td>42</td>
+<td>0</td>
+<td>100%</td>
+<td>8</td>
+<td>&mdash;</td>
+<td>&mdash;</td>
+<td>0.99</td>
+</tr><tr>
+<td class="l"><a href="rmst-n3/network.html">rmst-n3</a><br><span class="flags">--planner redundant-mst --n-redundancy 3</span>
+<br><span class="why">Overlay 3 spanning trees. Lands almost exactly on the 45-edge floor.</span></td>
+<td>45</td><td><span class="ok">+0</span></td>
+<td>54.37</td><td>179</td>
+<td>3/5.6/11</td>
+<td>4</td>
+<td>188</td>
+<td>0</td>
+<td>100%</td>
+<td>9</td>
+<td>&mdash;</td>
+<td>&mdash;</td>
+<td>1.0</td>
+</tr><tr>
+<td class="l"><a href="star-most-partners/network.html">star-most-partners</a><br><span class="flags">--planner star</span>
+<br><span class="why">Every ligand connected to one hub, chosen as the ligand with the most feasible partners.</span></td>
+<td>15</td><td><span class="below">&minus;30</span></td>
+<td>22.70</td><td>60</td>
+<td>1/1.9/15</td>
+<td>2</td>
+<td>0</td>
+<td>15</td>
+<td>0%</td>
+<td>1</td>
+<td>&mdash;</td>
+<td>&mdash;</td>
+<td>0.41</td>
+</tr><tr>
+<td class="l"><a href="star-min-total-cost/network.html">star-min-total-cost</a><br><span class="flags">--planner star --hub-selection min_total_cost</span>
+<br><span class="why">Same star, but the hub is the ligand whose edges are cheapest in total.</span></td>
+<td>15</td><td><span class="below">&minus;30</span></td>
+<td>22.70</td><td>60</td>
+<td>1/1.9/15</td>
+<td>2</td>
+<td>0</td>
+<td>15</td>
+<td>0%</td>
+<td>1</td>
+<td>&mdash;</td>
+<td>&mdash;</td>
+<td>0.41</td>
+</tr><tr>
+<td class="l"><a href="complete/network.html">complete</a><br><span class="flags">--planner complete</span>
+<br><span class="why">Every feasible pair. Not a proposal &mdash; the upper bound that makes the others readable.</span></td>
+<td>120</td><td><span class="ok">+75</span></td>
+<td>226.23</td><td>476</td>
+<td>15/15.0/15</td>
+<td>1</td>
+<td>6020</td>
+<td>0</td>
+<td>100%</td>
+<td>11</td>
+<td>&mdash;</td>
+<td>&mdash;</td>
+<td>1.0</td>
+</tr><tr class="sec"><td colspan="14">Path length and cycles</td></tr><tr>
+<td class="l"><a href="diameter-4/network.html">diameter-4</a><br><span class="flags">--max-diameter 4</span>
+<br><span class="why">Keep adding edges until no two ligands are more than 4 perturbations apart.</span></td>
+<td>24</td><td><span class="below">&minus;21</span></td>
+<td>24.53</td><td>95</td>
+<td>2/3.0/6</td>
+<td>4</td>
+<td>11</td>
+<td>0</td>
+<td>100%</td>
+<td>9</td>
+<td>&mdash;</td>
+<td>&mdash;</td>
+<td>0.98</td>
+</tr><tr>
+<td class="l"><a href="diameter-3/network.html">diameter-3</a><br><span class="flags">--max-diameter 3</span>
+<br><span class="why">Same, tightened to 3. Shorter chains, more edges.</span></td>
+<td>26</td><td><span class="below">&minus;19</span></td>
+<td>28.70</td><td>103</td>
+<td>2/3.2/8</td>
+<td>3</td>
+<td>17</td>
+<td>0</td>
+<td>100%</td>
+<td>8</td>
+<td>&mdash;</td>
+<td>&mdash;</td>
+<td>0.95</td>
+</tr><tr>
+<td class="l"><a href="cycle-coverage-edge/network.html">cycle-coverage-edge</a><br><span class="flags">--cycle-coverage-mode edge</span>
+<br><span class="why">Demand that every <em>edge</em> lie on a cycle, not merely every ligand. The FEP+ invariant.</span></td>
+<td>20</td><td><span class="below">&minus;25</span></td>
+<td>21.79</td><td>79</td>
+<td>2/2.5/4</td>
+<td>5</td>
+<td>3</td>
+<td>0</td>
+<td>100%</td>
+<td>9</td>
+<td>&mdash;</td>
+<td>&mdash;</td>
+<td>0.93</td>
+</tr><tr class="sec"><td colspan="14">Statistical design</td></tr><tr>
+<td class="l"><a href="a-optimal-44/network.html">a-optimal-44</a><br><span class="flags">--scorer variance --planner optimal --design a_optimal --n-edges 44</span>
+<br><span class="why">Pick 44 edges minimising the average variance of the predicted affinities (trace of the covariance).</span></td>
+<td>44</td><td><span class="below">&minus;1</span></td>
+<td>221.04</td><td>175</td>
+<td>1/5.5/13</td>
+<td>3</td>
+<td>205</td>
+<td>2</td>
+<td>95%</td>
+<td>10</td>
+<td>&mdash;</td>
+<td>&mdash;</td>
+<td>0.89</td>
+</tr><tr>
+<td class="l"><a href="d-optimal-44/network.html">d-optimal-44</a><br><span class="flags">--scorer variance --planner optimal --design d_optimal --n-edges 44</span>
+<br><span class="why">Pick 44 edges minimising the covariance determinant. Tends to produce more cycles than A-optimal.</span></td>
+<td>44</td><td><span class="below">&minus;1</span></td>
+<td>220.40</td><td>175</td>
+<td>1/5.5/12</td>
+<td>3</td>
+<td>209</td>
+<td>2</td>
+<td>95%</td>
+<td>10</td>
+<td>&mdash;</td>
+<td>&mdash;</td>
+<td>0.9</td>
+</tr><tr>
+<td class="l"><a href="a-optimal-44-allocated/network.html">a-optimal-44-allocated</a><br><span class="flags">--scorer variance --planner optimal --design a_optimal --n-edges 44 --design-total-ns 400</span>
+<br><span class="why">The A-optimal network, plus a 400 ns simulation budget divided across its edges by predicted information gain.</span></td>
+<td>44</td><td><span class="below">&minus;1</span></td>
+<td>221.04</td><td>175</td>
+<td>1/5.5/13</td>
+<td>3</td>
+<td>205</td>
+<td>2</td>
+<td>95%</td>
+<td>10</td>
+<td>&mdash;</td>
+<td>&mdash;</td>
+<td>0.89</td>
+</tr><tr class="sec"><td colspan="14">Counterpoised</td></tr><tr>
+<td class="l"><a href="cbfe-all/network.html">cbfe-all</a><br><span class="flags">--cbfe all</span>
+<br><span class="why">Replace every edge with a counterpoised (CBFE) calculation. No atom mapping needed at all.</span></td>
+<td>23</td><td><span class="below">&minus;22</span></td>
+<td>236.35</td><td>292</td>
+<td>2/2.9/15</td>
+<td>2</td>
+<td>9</td>
+<td>0</td>
+<td>100%</td>
+<td>0</td>
+<td>&mdash;</td>
+<td>23</td>
+<td>0.94</td>
+</tr><tr>
+<td class="l"><a href="cbfe-cycles/network.html">cbfe-cycles</a><br><span class="flags">--cbfe cycles</span>
+<br><span class="why">Allow counterpoised edges, but only where they would buy cycle coverage.</span></td>
+<td>20</td><td><span class="below">&minus;25</span></td>
+<td>20.00</td><td>79</td>
+<td>2/2.5/4</td>
+<td>7</td>
+<td>4</td>
+<td>3</td>
+<td>85%</td>
+<td>8</td>
+<td>&mdash;</td>
+<td>&mdash;</td>
+<td>0.77</td>
+</tr><tr>
+<td class="l"><a href="cbfe-cycles-edgecov/network.html">cbfe-cycles-edgecov</a><br><span class="flags">--cbfe cycles --cycle-coverage-mode edge</span>
+<br><span class="why">The combination that actually forces the question: CBFE allowed <em>and</em> every edge required on a cycle.</span></td>
+<td>20</td><td><span class="below">&minus;25</span></td>
+<td>21.79</td><td>79</td>
+<td>2/2.5/4</td>
+<td>5</td>
+<td>3</td>
+<td>0</td>
+<td>100%</td>
+<td>9</td>
+<td>&mdash;</td>
+<td>&mdash;</td>
+<td>0.93</td>
+</tr><tr>
+<td class="l"><a href="cbfe-bridge/network.html">cbfe-bridge</a><br><span class="flags">--cbfe bridge</span>
+<br><span class="why">Allow counterpoised edges only to join otherwise-disconnected pieces.</span></td>
+<td>20</td><td><span class="below">&minus;25</span></td>
+<td>20.00</td><td>79</td>
+<td>2/2.5/4</td>
+<td>7</td>
+<td>4</td>
+<td>3</td>
+<td>85%</td>
+<td>8</td>
+<td>&mdash;</td>
+<td>&mdash;</td>
+<td>0.77</td>
+</tr><tr class="sec"><td colspan="14">Soft-core consistency</td></tr><tr>
+<td class="l"><a href="consistency-component/network.html">consistency-component</a><br><span class="flags">--consistency component</span>
+<br><span class="why">Force one soft-core per ligand within each connected component, so a ligand keeps one scmask.</span></td>
+<td>20</td><td><span class="below">&minus;25</span></td>
+<td>24.75</td><td>79</td>
+<td>2/2.5/4</td>
+<td>7</td>
+<td>4</td>
+<td>3</td>
+<td>85%</td>
+<td>0</td>
+<td>&mdash;</td>
+<td>&mdash;</td>
+<td>0.77</td>
+</tr><tr>
+<td class="l"><a href="consistency-graph/network.html">consistency-graph</a><br><span class="flags">--consistency graph</span>
+<br><span class="why">Force one soft-core per ligand across the whole network.</span></td>
+<td>20</td><td><span class="below">&minus;25</span></td>
+<td>24.75</td><td>79</td>
+<td>2/2.5/4</td>
+<td>7</td>
+<td>4</td>
+<td>3</td>
+<td>85%</td>
+<td>0</td>
+<td>&mdash;</td>
+<td>&mdash;</td>
+<td>0.77</td>
+</tr><tr class="sec"><td colspan="14">Reference</td></tr><tr>
+<td class="l"><a href="compat-v0.4/network.html">compat-v0.4</a><br><span class="flags">--compat v0.4</span>
+<br><span class="why">Reproduce released v0.4 behaviour exactly. Confirms none of the above drifted the baseline.</span></td>
+<td>20</td><td><span class="below">&minus;25</span></td>
+<td>20.00</td><td>79</td>
+<td>2/2.5/4</td>
+<td>7</td>
+<td>4</td>
+<td>3</td>
+<td>85%</td>
+<td>8</td>
+<td>&mdash;</td>
+<td>&mdash;</td>
+<td>0.77</td>
+</tr>
+</tbody></table></div>
+
+<dl class="legend">
+<dt>vs floor</dt><dd>edges relative to the <code>n&middot;ln(n)</code> = <strong>45</strong>
+precision floor for n=16 (Pitman 2023). Negative is below it.</dd>
+<dt>cost</dt><dd>scorer units. <strong>Comparable only within one scorer.</strong> The
+A&#8209;/D&#8209;optimal rows use the <code>variance</code> scorer (kcal/mol predicted &sigma;)
+and their cost is <em>not</em> on the same scale as the <code>linear</code>-scorer rows.
+GPU&nbsp;h is comparable across every row.</dd>
+<dt>non-uniform SC</dt><dd>ligands carrying more than one distinct soft-core mask across their
+edges &mdash; each one needs a different <code>scmask</code> per edge in Amber.</dd>
+<dt>rejected</dt><dd>candidate pairs the feasibility gate refused. Each one is drawn in the
+variant's own report, under &ldquo;Rejected candidates&rdquo;, with the mapping that provoked it.</dd>
+<dt>robust</dt><dd>fraction of 100 Monte-Carlo trials still connected at a 5% per-edge failure
+rate (seed 20260824).</dd>
+</dl>
+
+<h2>What the soft-core repair fix changed</h2>
+<p>Four pairs used to be refused for <code>softcore_multiple_attachments</code>:
+<code>ejm42~ejm44</code>, <code>ejm42~ejm55</code>, <code>ejm43~ejm55</code>,
+<code>ejm44~ejm55</code>. The MCS kept a terminal methyl in the common core while the atom
+joining it to the rest of the core went soft-core, so the soft-core became a bridge rather than
+a substituent. The repair now absorbs the stranded fragment, and the pool is
+<strong>120 of 120 feasible</strong> with <strong>no rejections anywhere</strong>.</p>
+<div class="note">
+<strong>It moved less than the headline suggests.</strong> The recovered edges cost
+1.544&ndash;2.354 against a selected range of 0.273&ndash;1.983, because the demotion is charged
+through the scorer's <code>repair_cost</code> term (0.75 per demoted atom). So the default
+network is <em>identical</em>, and 15 of the 21 variants did not move at all. Only
+the denser ones did:
+</div>
+<div class="scroll"><table><thead><tr>
+<th class="l">variant</th><th colspan="2">before the fix</th><th colspan="2">after</th><th>rejected</th>
+</tr><tr><th class="l"></th><th>edges</th><th>cost</th><th>edges</th><th>cost</th><th></th></tr></thead>
+<tbody><tr><td class='l'><a href='mst-epl4/network.html'>mst-epl4</a></td><td>33</td><td>38.94</td><td>32</td><td>38.03</td><td>4 &rarr; 0</td></tr><tr><td class='l'><a href='rmst-n3/network.html'>rmst-n3</a></td><td>45</td><td>54.48</td><td>45</td><td>54.37</td><td>4 &rarr; 0</td></tr><tr><td class='l'><a href='complete/network.html'>complete</a></td><td>116</td><td>218.45</td><td>120</td><td>226.23</td><td>4 &rarr; 0</td></tr><tr><td class='l'><a href='a-optimal-44/network.html'>a-optimal-44</a></td><td>44</td><td>221.73</td><td>44</td><td>221.04</td><td>4 &rarr; 0</td></tr><tr><td class='l'><a href='d-optimal-44/network.html'>d-optimal-44</a></td><td>44</td><td>221.41</td><td>44</td><td>220.40</td><td>4 &rarr; 0</td></tr><tr><td class='l'><a href='a-optimal-44-allocated/network.html'>a-optimal-44-allocated</a></td><td>44</td><td>221.73</td><td>44</td><td>221.04</td><td>4 &rarr; 0</td></tr></tbody></table></div>
+<p class="meta">The gain is a candidate pool that stops refusing edges it can run, not a cheaper
+default network. <code>--edges-per-ligand 4</code> is the clearest win: degree four reached with
+one fewer edge, and cheaper.</p>
+
+<h2>What each option does</h2>
+<dl class="knobs">
+<dt>--edges-per-ligand N</dt><dd>Target minimum degree. After the spanning tree is fixed, edges are
+added until every ligand has at least N. The main redundancy dial (default 2).</dd>
+<dt>--planner redundant-mst --n-redundancy N</dt><dd>Overlay N spanning trees, then apply the usual
+degree and cycle redundancy on top. Redundancy from independent trees rather than from degree.</dd>
+<dt>--planner star [--hub-selection ...]</dt><dd>Connect every ligand to one hub.
+<code>most_partners</code> picks the ligand with the most feasible edges; <code>min_total_cost</code>
+the one whose edges are cheapest in total.</dd>
+<dt>--planner complete</dt><dd>Select every feasible candidate pair. A reference point.</dd>
+<dt>--max-diameter N</dt><dd>Add edges until no two ligands are more than N perturbations apart.
+Long chains are where error accumulates; LOMAP caps at 6, FEP+ works below 5.</dd>
+<dt>--cycle-coverage-mode {node,edge}</dt><dd><code>node</code> (default) asks that every
+<em>ligand</em> lie on a cycle. <code>edge</code> asks that every <em>edge</em> does &mdash; strictly
+stronger, and what makes cycle-closure error checking apply to every transformation.</dd>
+<dt>--scorer variance</dt><dd>Score edges as a predicted standard deviation in kcal/mol rather than
+on an arbitrary difficulty scale. Required for optimal design, which needs a real &sigma;.</dd>
+<dt>--planner optimal --design {a_optimal,d_optimal}</dt><dd>Choose edges to minimise a functional of
+the estimate covariance <code>C</code>. <strong>A-optimal</strong> minimises <code>tr(C)</code>, the
+average variance. <strong>D-optimal</strong> minimises <code>det(C)</code>, which favours more cycles.</dd>
+<dt>--design-total-ns NS</dt><dd>Divide a total simulation budget across the selected edges by
+predicted information gain, and write per-edge &lambda; windows and nanoseconds into the Amber
+runconfigs.</dd>
+<dt>--cbfe {off,bridge,cycles,all}</dt><dd>Allow counterpoised edges &mdash; two absolute calculations
+run in opposite directions, needing no atom mapping. <code>bridge</code> only to join disconnected
+pieces, <code>cycles</code> also to close cycles, <code>all</code> for the entire network.</dd>
+<dt>--consistency {pairwise,component,graph}</dt><dd>How widely a ligand's soft-core must agree.
+<code>pairwise</code> (default) lets each edge choose its own; <code>component</code> forces one per
+ligand within a component; <code>graph</code> forces one across the whole network &mdash; which is
+what lets a ligand keep a single Amber <code>scmask</code>.</dd>
+<dt>--compat v0.4</dt><dd>Pin every algorithmic knob to released v0.4 behaviour, so a known result
+stays reachable by name.</dd>
+</dl>
+
+<h2>What the runs actually showed</h2>
+
+<h3>Nothing is rejected any more</h3>
+<p>Every pair in the set is now feasible: <strong>120 of 120</strong>. Until the stranded-core
+repair landed, four pairs &mdash; <code>ejm42~ejm44</code>, <code>ejm42~ejm55</code>,
+<code>ejm43~ejm55</code> and <code>ejm44~ejm55</code> &mdash; were refused for
+<code>softcore_multiple_attachments</code>. The MCS had kept a terminal methyl in the common core
+while the atom joining it to the rest of the core went soft-core, which made the soft-core a
+bridge rather than a substituent. The repair now absorbs the stranded fragment instead of
+rejecting the edge.</p>
+<p>It changed less than you might expect. The recovered edges cost 1.544&ndash;2.354 against a
+selected range of 0.273&ndash;1.983, because the demotion is charged through the scorer's
+<code>repair_cost</code> term, so <strong>the default network is identical</strong>. Only the
+denser variants move: <code>--edges-per-ligand 4</code> now reaches degree four with 32 edges
+instead of 33 and costs less, <code>complete</code> gains the four edges, and the two optimal
+designs swap a few for marginally better totals.</p>
+
+<h3>The default network is below the floor and has three bridges</h3>
+<p><code>mst</code> at the default <code>--edges-per-ligand 2</code> gives 20 edges &mdash; 25
+short of the 45-edge floor &mdash; a diameter of 7, and three bridge edges. Node cycle coverage
+is already 1.0, which is why the default stops there, but 15% of edges sit on no cycle at all
+and cannot be error-checked. Its robustness is the worst of any connected variant: only
+<strong>77%</strong> of failure trials stay connected.</p>
+
+<h3><code>--cycle-coverage-mode edge</code> is nearly free</h3>
+<p>It swaps exactly one edge (still 20 total), and takes bridges 3&nbsp;&rarr;&nbsp;0 and edge
+cycle coverage 85%&nbsp;&rarr;&nbsp;100% for +1.79 cost and no extra GPU time. On this set it
+is the single best value change to the default.</p>
+
+<h3>Both star hub heuristics pick the same ligand, by coincidence</h3>
+<p><code>ejm46</code> is simultaneously tied for most partners (15) and the strict
+minimum-total-cost hub (22.70, next best 23.55). So <code>--hub-selection min_total_cost</code>
+is genuinely evaluated here but changes nothing &mdash; this set does not discriminate the two
+heuristics. Either way the star has 15 bridges and zero cycles: no cycle closure anywhere, so
+no internal consistency check.</p>
+
+<h3>CBFE edges are never competitive on this set</h3>
+<p><code>--cbfe bridge</code> and <code>--cbfe cycles</code> both return the default network
+unchanged. That is not an inert flag: <code>cycles</code> mode does stock the CBFE pool, but
+with node coverage already satisfied nothing spends it. Forcing the issue with
+<code>--cbfe cycles --cycle-coverage-mode edge</code> still selects <strong>zero</strong> CBFE
+edges &mdash; the result is identical to the pure-RBFE <code>cycle-coverage-edge</code> run.
+With every pair feasible there is always a cheaper RBFE edge available. CBFE is
+worth reaching for on this series only as a deliberate methodological choice, not for topology.</p>
+
+<h3><code>--cbfe all</code> costs 3.2&times; per edge</h3>
+<p>23 counterpoised edges at <strong>12.70</strong> GPU&nbsp;h each against
+<strong>3.97</strong> for the 20 RBFE edges &mdash; a per-edge ratio of
+<strong>3.20&times;</strong>. Whole-network: 79&nbsp;&rarr;
+292 GPU&nbsp;h, a 3.68&times; increase. It also plans in 0.5&nbsp;s because it needs no mapping.</p>
+
+<h3>Soft-core consistency is the one that changes the Amber setup</h3>
+<p>Under every default-mapping variant, <strong>8 of 16</strong> ligands carry more than one
+distinct soft-core mask across their edges &mdash; a different <code>scmask</code> per edge for
+half the series. Both <code>--consistency component</code> and <code>--consistency graph</code>
+take that to <strong>0</strong>, on the identical 20-edge topology, for +4.75 cost
+(20.00&nbsp;&rarr;&nbsp;24.75) and no change in GPU hours. The two modes give byte-identical
+networks here because the candidate pool is a single component.</p>
+</div>

@@ -1,4 +1,4 @@
-"""The four-stage pipeline: map, repair, score, plan.
+"""The pipeline: map, repair, score, bridge, plan.
 
 :func:`build_network` is the package's main entry point. Everything the CLI does, and
 everything an embedding program needs, goes through here.
@@ -7,6 +7,14 @@ The stage that most shapes the result is the second one. A mapper is allowed to 
 fragmented soft-core; the repair either fixes it or rejects the edge. Rejection is a
 normal outcome recorded on the candidate, never an exception -- one impossible pair among
 several hundred must not abort a run.
+
+The fourth stage, :func:`augment_with_intermediates`, is the newest and the only one that
+changes the *vertex* set. It is off by default and runs between scoring and planning,
+where it can see which pairs the first three stages could not relate and hand exactly
+those to a generator. Why there rather than per-pair, inside :func:`build_candidate`, or
+as a second pass over an augmented ligand set is argued in that function's docstring; the
+short version is that whether an intermediate is worth making is a question about the
+*network*, and only a stage that runs once over the settled pool can answer it.
 """
 
 from __future__ import annotations
@@ -16,21 +24,22 @@ import sys
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import replace
-from typing import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Callable, Mapping, Sequence
 
 import networkx as nx
 
 from rbfenetmap.core.cbfe import build_cbfe_pool, make_cbfe_transformation
 from rbfenetmap.core.consistency import maybe_apply_graph_consistency
 from rbfenetmap.core.descriptors import compute_descriptors
-from rbfenetmap.core.exceptions import MappingError, RepairError
+from rbfenetmap.core.exceptions import MappingError, NetworkPlanError, RepairError
 from rbfenetmap.core.meta.mappers import AbstractMapper
 from rbfenetmap.core.meta.planners import AbstractNetworkPlanner
 from rbfenetmap.core.meta.scorers import AbstractScorer
 from rbfenetmap.core.models import (
     AtomMapping,
     EdgeScore,
+    IntermediateRecord,
     Ligand,
     Network,
     RejectionReason,
@@ -38,10 +47,23 @@ from rbfenetmap.core.models import (
     Transformation,
 )
 from rbfenetmap.core.options import MappingOptions, NetworkOptions
+from rbfenetmap.core.intermediates import reserve_intermediate_names
 from rbfenetmap.core.pairs import fingerprint_pair_similarities, generate_candidate_pairs
 from rbfenetmap.core.softcore import precheck_mapping, repair_softcore_connectivity
 
-__all__ = ("build_candidate", "build_network", "evaluate_pairs", "evaluate_pairs_adaptively")
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from rbfenetmap.core.intermediates import IntermediateProposal
+    from rbfenetmap.core.meta.intermediates import AbstractIntermediateGenerator
+
+__all__ = (
+    "AugmentationResult",
+    "augment_with_intermediates",
+    "build_candidate",
+    "build_network",
+    "evaluate_pairs",
+    "evaluate_pairs_adaptively",
+    "feasible_graph",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -237,8 +259,28 @@ def evaluate_pairs(
     return [result for result in results if result is not None]
 
 
-def _feasible_graph(names: Sequence[str], candidates: Sequence[Transformation]) -> nx.Graph:
-    """Build the undirected graph of candidates that passed feasibility checks."""
+def feasible_graph(names: Sequence[str], candidates: Sequence[Transformation]) -> nx.Graph:
+    """Build the undirected graph of candidates that passed feasibility checks.
+
+    Parameters
+    ----------
+    names : Sequence[str]
+        Every ligand, so an isolated one is a node of its own rather than absent.
+    candidates : Sequence[Transformation]
+        Scored candidates, feasible or not.
+
+    Returns
+    -------
+    networkx.Graph
+
+    Notes
+    -----
+    Public because two stages now need exactly this graph and they must agree on it: the
+    adaptive loop decides which pairs still cross a component boundary, and
+    :func:`augment_with_intermediates` decides which gaps are worth offering to a
+    generator. Two private copies that drifted apart would show up as a generator being
+    offered a gap that no longer exists.
+    """
     graph: nx.Graph = nx.Graph()
     graph.add_nodes_from(names)
     graph.add_edges_from(candidate.unordered_key for candidate in candidates if candidate.feasible)
@@ -259,7 +301,7 @@ def _initial_adaptive_pairs(
     return [pair for pair in ranked_pairs if pair in chosen]
 
 
-def evaluate_pairs_adaptively(
+def _adaptive_candidate_pool(
     ligands: Mapping[str, Ligand],
     pairs: Sequence[tuple[str, str]],
     mapper: AbstractMapper,
@@ -267,8 +309,14 @@ def evaluate_pairs_adaptively(
     planner: AbstractNetworkPlanner,
     mapping_options: MappingOptions,
     network_options: NetworkOptions,
-) -> Network:
+) -> list[Transformation]:
     """Evaluate promising pairs in batches until the network targets are met.
+
+    Returns the candidate pool rather than a planned network, because two callers need
+    different things from it: :func:`evaluate_pairs_adaptively` plans immediately, while
+    :func:`build_network` has an intermediate-generation stage to run over the settled
+    pool first. Splitting it here rather than re-planning afterwards is what keeps
+    generation from seeing a pool the loop was still growing.
 
     Connectivity expansion always prioritizes unevaluated pairs crossing the current
     feasible components. If connectivity remains impossible, every possible bridge is
@@ -331,8 +379,8 @@ def evaluate_pairs_adaptively(
         evaluate(initial)
         last_network: Network | None = None
         while True:
-            feasible_graph = _feasible_graph(names, candidates)
-            components = list(nx.connected_components(feasible_graph))
+            components_graph = feasible_graph(names, candidates)
+            components = list(nx.connected_components(components_graph))
             membership = {name: index for index, component in enumerate(components) for name in component}
             bridges = [pair for pair in remaining if membership[pair[0]] != membership[pair[1]]]
 
@@ -373,9 +421,54 @@ def evaluate_pairs_adaptively(
             remaining = [pair for pair in remaining if pair not in chosen]
 
     logger.info("Adaptive evaluation stopped after %d of %d candidate pair(s)", len(candidates), len(pairs))
-    # Re-plan outside warning suppression so any genuinely unmet best-effort target is
-    # visible exactly once. For a required but impossible connection this raises with
-    # diagnostics after all component-bridging possibilities have been attempted.
+    return candidates
+
+
+def evaluate_pairs_adaptively(
+    ligands: Mapping[str, Ligand],
+    pairs: Sequence[tuple[str, str]],
+    mapper: AbstractMapper,
+    scorer: AbstractScorer,
+    planner: AbstractNetworkPlanner,
+    mapping_options: MappingOptions,
+    network_options: NetworkOptions,
+) -> Network:
+    """Evaluate pairs adaptively and plan over what was evaluated.
+
+    Parameters
+    ----------
+    ligands : Mapping[str, Ligand]
+    pairs : Sequence[tuple[str, str]]
+        Every pair the loop is allowed to reach for, in any order.
+    mapper : AbstractMapper
+    scorer : AbstractScorer
+    planner : AbstractNetworkPlanner
+        Drives the loop as well as producing the result: the probe plans are what tell the
+        loop whether any target is still unmet.
+    mapping_options : MappingOptions
+    network_options : NetworkOptions
+
+    Returns
+    -------
+    Network
+
+    Notes
+    -----
+    A thin wrapper over :func:`_adaptive_candidate_pool`, which does the work. It stays
+    public and keeps returning a :class:`~rbfenetmap.core.models.Network` because that is
+    its released signature; handing back a candidate list instead would be a real API
+    break for anything that calls it directly.
+
+    Intermediate generation is deliberately **not** run here. It belongs after the loop
+    settles and before planning, which is :func:`build_network`'s job -- and a caller who
+    reaches for this function directly is asking for adaptive evaluation of the pairs it
+    was given, not for new vertices it never mentioned.
+
+    The final plan runs outside the loop's warning suppression, so any genuinely unmet
+    best-effort target is visible exactly once. For a required but impossible connection
+    it raises with diagnostics, after every component-bridging possibility was attempted.
+    """
+    candidates = _adaptive_candidate_pool(ligands, pairs, mapper, scorer, planner, mapping_options, network_options)
     return planner.plan(ligands, candidates, network_options)
 
 
@@ -398,6 +491,480 @@ def _all_cbfe_candidates(ligands: Mapping[str, Ligand], network_options: Network
     """
     pool = build_cbfe_pool(ligands, network_options)
     return tuple(make_cbfe_transformation(ligands[a], ligands[b], network_options) for a, b in sorted(pool))
+
+
+@dataclass(frozen=True)
+class AugmentationResult:
+    """What intermediate generation added to the pipeline's inputs.
+
+    Parameters
+    ----------
+    ligands : Mapping[str, Ligand]
+        The real ligands followed by every invented one, in acceptance order. The same
+        mapping object as the input when generation was off, so the default path pays
+        nothing for the stage existing.
+    candidates : tuple[Transformation, ...]
+        The original pool plus the sub-edges of accepted proposals -- infeasible ones
+        included, for the same reason the pipeline keeps every other rejection.
+    records : tuple[IntermediateRecord, ...], optional
+        One per gap *attempted*, in the order attempted.
+    unmet_constraints : tuple[str, ...], optional
+        Best-effort budgets generation could not satisfy, phrased for the user and merged
+        into the planned network's own list.
+
+    Notes
+    -----
+    A result object rather than a mutated network because generation runs *before* the
+    planner: there is no network yet to mutate, and building one only to replan over it
+    would discard the rejections that justified the intermediates in the first place.
+    """
+
+    ligands: Mapping[str, Ligand]
+    candidates: tuple[Transformation, ...]
+    records: tuple[IntermediateRecord, ...] = ()
+    unmet_constraints: tuple[str, ...] = ()
+
+    @property
+    def synthetic_names(self) -> tuple[str, ...]:
+        """Names of the invented vertices, in acceptance order."""
+        return tuple(name for name, ligand in self.ligands.items() if ligand.synthetic)
+
+
+def _dedupe_key(ligand: Ligand) -> tuple[str, int]:
+    """Return the identity a synthetic ligand is deduped on: structure and charge.
+
+    Canonical SMILES with hydrogens suppressed, so a molecule built with explicit
+    hydrogens and the same molecule without them are one entry, and net formal charge,
+    because two protonation states of the same skeleton are genuinely different ligands.
+    """
+    from rdkit import Chem
+
+    return (Chem.MolToSmiles(Chem.RemoveHs(Chem.Mol(ligand.mol))), ligand.charge)
+
+
+def _intermediate_gaps(
+    ligands: Mapping[str, Ligand], candidates: Sequence[Transformation], network_options: NetworkOptions
+) -> list[tuple[str, str]]:
+    """Return the pairs worth offering to a generator, best first.
+
+    Parameters
+    ----------
+    ligands : Mapping[str, Ligand]
+    candidates : Sequence[Transformation]
+        The settled pool, feasible and not.
+    network_options : NetworkOptions
+
+    Returns
+    -------
+    list[tuple[str, str]]
+        Unordered pairs, ranked by decreasing fingerprint similarity and truncated to
+        ``intermediates.max_gaps``.
+
+    Notes
+    -----
+    **A banned pair is never a gap.** ``A~M~B`` is a way of running exactly the comparison
+    the user forbade, at twice the cost, so honouring the ban only on the direct edge
+    would honour it in letter and break it in substance.
+
+    Ranking is by fingerprint similarity for the same reason the adaptive loop uses it: it
+    costs no mapping, and the pairs most likely to have a bridgeable intermediate are the
+    ones already most alike. ``max_gaps`` then cuts the tail, where the pairs are least
+    similar and a generator is least likely to find anything.
+    """
+    options = network_options.intermediates
+    names = list(ligands)
+    graph = feasible_graph(names, candidates)
+    membership = {name: index for index, component in enumerate(nx.connected_components(graph)) for name in component}
+    feasible_pairs = {candidate.unordered_key for candidate in candidates if candidate.feasible}
+
+    gaps: set[tuple[str, str]] = set()
+    for candidate in candidates:
+        pair = candidate.unordered_key
+        if pair in feasible_pairs:
+            continue
+        crosses = membership[pair[0]] != membership[pair[1]]
+        if crosses or options.fills_internal_gaps:
+            gaps.add(pair)
+    # A forced pair with no feasible mapping is offered whatever the mode and whatever the
+    # components say: the user demanded that comparison, and an intermediate is the only
+    # way to keep it relative.
+    for pair in network_options.forced_pairs:
+        if pair not in feasible_pairs and pair[0] in ligands and pair[1] in ligands:
+            gaps.add(pair)
+    gaps -= network_options.banned_pairs
+
+    ranked = sorted(gaps)
+    similarities = fingerprint_pair_similarities(ligands, ranked)
+    ranked.sort(key=lambda pair: (-similarities[pair], pair))
+    if options.max_gaps is not None:
+        ranked = ranked[: options.max_gaps]
+    return ranked
+
+
+def _synthesize_molecules(
+    proposal: "IntermediateProposal",
+    pool: Mapping[str, Ligand],
+    generator: "AbstractIntermediateGenerator",
+    network_options: NetworkOptions,
+    mapping_options: MappingOptions,
+    *,
+    limit: int,
+    known: Mapping[tuple[str, int], str],
+    trace: list[str],
+) -> dict[str, Ligand]:
+    """Pose a proposal's molecules and keep the ones that are new and legal."""
+    from rbfenetmap.core.intermediates import synthesize_ligand
+
+    made: dict[str, Ligand] = {}
+    for proposed in proposal.molecules:
+        if len(made) >= limit:
+            trace.append(f"stopped at {limit} molecule(s) for this gap")
+            break
+        missing = [name for name in proposed.parents if name not in pool]
+        if missing:
+            trace.append(f"proposal names unknown parent(s) {missing}; skipped")
+            continue
+        ligand, result = synthesize_ligand(
+            proposed,
+            {name: pool[name] for name in proposed.parents},
+            generator=generator.name,
+            softcore=network_options.softcore,
+            options=network_options.intermediates,
+            mapping_options=mapping_options,
+        )
+        trace.extend(result.trace)
+        if ligand is None:
+            continue
+        duplicate = known.get(_dedupe_key(ligand))
+        if duplicate is not None:
+            # Not a failure. The molecule the generator wanted is already a vertex, so the
+            # bridge it was meant to build either exists or was already found infeasible.
+            trace.append(f"{ligand.name} duplicates {duplicate}; not added again")
+            continue
+        if ligand.name in pool or ligand.name in made:
+            trace.append(f"{ligand.name} was already invented; not added again")
+            continue
+        made[ligand.name] = ligand
+    return made
+
+
+def _sub_edge_pairs(
+    proposal: "IntermediateProposal", made: Mapping[str, Ligand], pool: Mapping[str, Ligand], trace: list[str]
+) -> list[tuple[str, str]]:
+    """Return the pairs a proposal's links ask to have evaluated.
+
+    A generator that supplies no links is taken to mean the obvious thing -- each new
+    molecule against each of its parents -- rather than being treated as having proposed
+    nothing. Links naming a molecule that failed posing are dropped with a note, because
+    the interesting fact for the user is the pose failure, not its consequence.
+    """
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    links: list[tuple[str, str]] = [(link.source, link.target) for link in proposal.links]
+    if not links:
+        links = [(parent, name) for name, ligand in made.items() for parent in ligand.provenance.parents]
+    for source, target in links:
+        if source == target:
+            continue
+        if source not in made and target not in made:
+            trace.append(f"link {source}~{target} names no surviving molecule; skipped")
+            continue
+        if (source not in made and source not in pool) or (target not in made and target not in pool):
+            trace.append(f"link {source}~{target} names an unknown ligand; skipped")
+            continue
+        pair = (source, target) if source < target else (target, source)
+        if pair in seen:
+            continue
+        seen.add(pair)
+        pairs.append(pair)
+    return pairs
+
+
+def _connecting_subgraph(
+    source: str, target: str, made: Mapping[str, Ligand], sub_edges: Sequence[Transformation]
+) -> "nx.Graph | None":
+    """Return the part of the sub-edge graph that actually bridges *source* to *target*.
+
+    ``None`` when the feasible sub-edges leave the two ends unconnected, which is the
+    signal to drop the proposal whole. Synthetic vertices of degree one are then pruned
+    repeatedly: they hang off the bridge without contributing to it, and every one of them
+    is a vertex the spanning network would have to pay an edge to reach.
+
+    Only the proposal's *own* sub-edges are in this graph. Asking instead whether the two
+    ends are connected in the augmented pool would answer yes for any gap inside an
+    already-connected component, which is precisely the case ``mode="gaps"`` exists to
+    address and precisely where a useless proposal must still be refused.
+    """
+    graph: nx.Graph = nx.Graph()
+    graph.add_nodes_from((source, target))
+    for edge in sub_edges:
+        if edge.feasible:
+            graph.add_edge(*edge.unordered_key)
+    if not nx.has_path(graph, source, target):
+        return None
+    graph = graph.subgraph(nx.node_connected_component(graph, source)).copy()
+    pruning = True
+    while pruning:
+        pruning = False
+        for node in [n for n in graph if n in made and graph.degree(n) <= 1]:
+            graph.remove_node(node)
+            pruning = True
+    if not nx.has_path(graph, source, target):  # pragma: no cover - pruning cannot cut the path
+        return None
+    return graph
+
+
+def augment_with_intermediates(
+    ligands: Mapping[str, Ligand],
+    candidates: Sequence[Transformation],
+    generator: "AbstractIntermediateGenerator",
+    mapper: AbstractMapper,
+    scorer: AbstractScorer,
+    mapping_options: MappingOptions,
+    network_options: NetworkOptions,
+) -> AugmentationResult:
+    """Invent ligands for the gaps no mapping could cross, and score the new sub-edges.
+
+    The fifth stage, between scoring and planning: **map -> repair -> score -> bridge ->
+    plan**.
+
+    Parameters
+    ----------
+    ligands : Mapping[str, Ligand]
+        The real ligands.
+    candidates : Sequence[Transformation]
+        The settled candidate pool, feasible and not. Its rejections are what define the
+        gaps.
+    generator : AbstractIntermediateGenerator
+        Proposes molecules. It never decides feasibility and never prices anything.
+    mapper, scorer : AbstractMapper or AbstractScorer
+        **The user's own**, unchanged. Every proposed sub-edge is put through
+        :func:`build_candidate` with them and with the run's
+        :class:`~rbfenetmap.core.options.SoftcorePolicy`.
+    mapping_options : MappingOptions
+    network_options : NetworkOptions
+        Supplies :attr:`~rbfenetmap.core.options.NetworkOptions.intermediates`, the bans,
+        the forced pairs, and the ``n_edges`` headroom.
+
+    Returns
+    -------
+    AugmentationResult
+        With the input mapping and pool returned unchanged when
+        ``intermediates.mode == "off"``.
+
+    Notes
+    -----
+    **The generator proposes; the existing feasibility machinery is the sole judge.**
+    Nothing here fabricates a :class:`~rbfenetmap.core.models.Transformation` the way
+    :func:`~rbfenetmap.core.cbfe.make_cbfe_transformation` legitimately does, and the
+    difference is not stylistic: a counterpoised edge has no geometry to check, while an
+    intermediate edge is nothing *but* geometry. A badly posed molecule has to come back
+    as an ordinary ``core_geometry_mismatch``, which is exactly what routing through
+    :func:`build_candidate` makes happen.
+
+    **A proposal is accepted or dropped whole.** If the surviving feasible sub-edges do
+    not connect the two ends of the gap, the molecules go too -- there is no such thing as
+    a partially useful intermediate, and an orphan synthetic vertex would be a ligand
+    nobody can compute a free energy for.
+
+    **The edge budget is spent, not inflated.** See
+    :meth:`~rbfenetmap.core.options.NetworkOptions.intermediate_headroom`. Running out is
+    recorded on ``unmet_constraints`` rather than raised, because it leaves a perfectly
+    valid network.
+
+    **This stage is deliberately serial.** Posing consumes a fixed seed per molecule and
+    naming is content-addressed, but the *order* in which gaps consume the shared budget
+    is not commutative -- so the pool is evaluated under ``jobs`` while the augmentation
+    over it is not, and the output is identical at any ``jobs``.
+    """
+    options = network_options.intermediates
+    if not options.enabled:
+        return AugmentationResult(ligands=ligands, candidates=tuple(candidates))
+
+    pool: dict[str, Ligand] = dict(ligands)
+    scored: list[Transformation] = list(candidates)
+    gaps = _intermediate_gaps(pool, scored, network_options)
+    logger.info("Intermediate generation (mode=%r) offered %d gap(s) to %r", options.mode, len(gaps), generator.name)
+
+    records: list[IntermediateRecord] = []
+    unmet: list[str] = []
+    invented: dict[str, Ligand] = {}
+    known: dict[tuple[str, int], str] = {_dedupe_key(ligand): name for name, ligand in pool.items()}
+    headroom = network_options.intermediate_headroom(len(pool))
+    budget = options.max_intermediates
+
+    for index, (source, target) in enumerate(gaps):
+        remaining_gaps = len(gaps) - index
+        if headroom is not None and headroom <= 0:
+            unmet.append(
+                f"n_edges={network_options.n_edges} left no room for intermediates; "
+                f"{remaining_gaps} gap(s) were not bridged"
+            )
+            break
+        if budget is not None and budget <= 0:
+            unmet.append(
+                f"max_intermediates={options.max_intermediates} reached; {remaining_gaps} gap(s) were not bridged"
+            )
+            break
+
+        caps = [options.max_molecules, *(value for value in (headroom, budget) if value is not None)]
+        record = _bridge_one_gap(
+            source,
+            target,
+            pool,
+            invented,
+            known,
+            generator,
+            mapper,
+            scorer,
+            mapping_options,
+            network_options,
+            scored,
+            limit=min(caps),
+        )
+        records.append(record)
+        if record.accepted:
+            headroom = None if headroom is None else headroom - len(record.names)
+            budget = None if budget is None else budget - len(record.names)
+
+    if invented:
+        logger.info("Invented %d ligand(s): %s", len(invented), sorted(invented))
+    return AugmentationResult(
+        ligands={**pool, **invented}, candidates=tuple(scored), records=tuple(records), unmet_constraints=tuple(unmet)
+    )
+
+
+def _bridge_one_gap(
+    source: str,
+    target: str,
+    pool: Mapping[str, Ligand],
+    invented: dict[str, Ligand],
+    known: dict[tuple[str, int], str],
+    generator: "AbstractIntermediateGenerator",
+    mapper: AbstractMapper,
+    scorer: AbstractScorer,
+    mapping_options: MappingOptions,
+    network_options: NetworkOptions,
+    scored: list[Transformation],
+    *,
+    limit: int,
+) -> IntermediateRecord:
+    """Attempt one gap, mutating *invented*, *known* and *scored* only on acceptance.
+
+    Kept separate from :func:`augment_with_intermediates` so that the all-or-nothing rule
+    is enforced by control flow rather than by discipline: every early return here is a
+    refusal that has added nothing.
+    """
+
+    def refuse(reason: str, trace: Sequence[str]) -> IntermediateRecord:
+        """Record an attempt that contributed no ligand."""
+        return IntermediateRecord(
+            source=source, target=target, generator=generator.name, rejection=reason, trace=tuple(trace)
+        )
+
+    available = {**pool, **invented}
+    if not generator.supports_pair(available[source], available[target]):
+        return refuse("generator_declined_pair", ())
+
+    proposal = generator.propose(available[source], available[target], network_options.intermediates, mapping_options)
+    trace: list[str] = list(proposal.trace)
+    if not proposal.proposed:
+        return refuse(proposal.rejection or "nothing_proposed", trace)
+
+    made = _synthesize_molecules(
+        proposal, available, generator, network_options, mapping_options, limit=limit, known=known, trace=trace
+    )
+    if not made:
+        return refuse(proposal.rejection or "no_molecule_survived_posing", trace)
+
+    augmented = {**available, **made}
+    sub_edges = [
+        build_candidate(augmented[a], augmented[b], mapper, scorer, mapping_options, network_options)
+        for a, b in _sub_edge_pairs(proposal, made, available, trace)
+    ]
+    for edge in sub_edges:
+        reasons = ", ".join(reason.value for reason in edge.score.rejections) or "unknown"
+        trace.append(f"sub-edge {edge.key}: {'feasible' if edge.feasible else f'rejected ({reasons})'}")
+
+    bridge = _connecting_subgraph(source, target, made, sub_edges)
+    if bridge is None:
+        trace.append("feasible sub-edges do not connect the gap; proposal dropped whole")
+        return refuse("sub_edges_do_not_bridge", trace)
+
+    adopted = {name: ligand for name, ligand in made.items() if name in bridge}
+    dropped = sorted(set(made) - set(adopted))
+    if dropped:
+        trace.append(f"dropped molecule(s) contributing nothing to the bridge: {dropped}")
+    if not adopted:
+        trace.append("the gap was bridged without any invented molecule; nothing to adopt")
+        return refuse("sub_edges_do_not_bridge", trace)
+    invented.update(adopted)
+    known.update({_dedupe_key(ligand): name for name, ligand in adopted.items()})
+    scored.extend(edge for edge in sub_edges if edge.source in bridge and edge.target in bridge)
+    return IntermediateRecord(
+        source=source, target=target, generator=generator.name, accepted=True, names=tuple(adopted), trace=tuple(trace)
+    )
+
+
+def _plan_over_augmented_pool(
+    ligands: Mapping[str, Ligand],
+    candidates: Sequence[Transformation],
+    mapper: AbstractMapper,
+    scorer: AbstractScorer,
+    planner: AbstractNetworkPlanner,
+    mapping_options: MappingOptions,
+    network_options: NetworkOptions,
+) -> Network:
+    """Run generation over a settled pool, then plan, then attach the record.
+
+    The one place the fourth and fifth stages meet, shared by the eager and adaptive
+    paths so they cannot diverge.
+
+    Notes
+    -----
+    **No precedence logic sits between this and ``cbfe_mode``, and none is needed.** CBFE
+    eligibility is evaluated inside the planner against the components of the pool it was
+    handed. Generation runs first and changes that pool, so a gap an intermediate closed is
+    no longer a gap when the planner computes components and CBFE never triggers for it;
+    a gap generation could not close is still a gap, and ``cbfe_mode="bridge"`` still
+    rescues it. "Stay relative, fall back to counterpoised, only then fail" falls out of
+    stage order, and a flag expressing it would be a second, disagreeable source of truth.
+
+    The generator is constructed **only** when the feature is on, which is also what keeps
+    the lazy-import rule: a run that does not ask for intermediates never imports one.
+
+    A disconnection that survives generation carries the attempt record out through the
+    refusal, the way ``cmd_plan`` carries its geometry hint out through one. The planner
+    is handed a pool, not a history, so it cannot write that paragraph itself -- and a
+    user who switched generation on and still got a disconnection needs to know which of
+    their gaps were offered and why each was refused.
+    """
+    result = AugmentationResult(ligands=ligands, candidates=tuple(candidates))
+    if network_options.generates_intermediates:
+        from rbfenetmap.plugins.intermediates import create_intermediate
+
+        generator = create_intermediate(network_options.intermediates.generator)
+        result = augment_with_intermediates(
+            ligands, candidates, generator, mapper, scorer, mapping_options, network_options
+        )
+
+    try:
+        network = planner.plan(result.ligands, result.candidates, network_options)
+    except NetworkPlanError as exc:
+        from rbfenetmap.core.intermediates import describe_intermediate_attempts
+
+        paragraph = describe_intermediate_attempts(result.records)
+        if not paragraph:
+            raise
+        raise NetworkPlanError(f"{exc}\n{paragraph}", rejected=exc.rejected) from exc
+
+    # Both, not just the records: a budget that left no room stops generation before the
+    # first gap is attempted, so there is a message to carry with no record behind it.
+    if not result.records and not result.unmet_constraints:
+        return network
+    return replace(
+        network, intermediates=result.records, unmet_constraints=(*network.unmet_constraints, *result.unmet_constraints)
+    )
 
 
 def build_network(
@@ -462,6 +1029,10 @@ def build_network(
     mapping_options = mapping_options or MappingOptions()
     network_options = network_options or NetworkOptions()
     network_options.check_edge_budget(len(ligands))
+    # Reserved only when generation is on. A user with a ligand honestly named ``int_3``
+    # is running a plan that cannot invent a colliding name, and refusing it would be a
+    # compatibility break bought for nothing.
+    reserve_intermediate_names(ligands, enabled=network_options.generates_intermediates)
 
     scorer_obj = create_scorer(scorer) if isinstance(scorer, str) else scorer
     planner_obj = create_planner(planner) if isinstance(planner, str) else planner
@@ -501,9 +1072,19 @@ def build_network(
             ),
             network_options,
             scorer=scorer_obj,
+        # The pool, not the plan: generation runs once after the loop settles, never
+        # inside it. Generating mid-loop would satisfy connectivity with synthetic nodes
+        # and stop the very RBFE expansion the loop exists to drive -- the same rationale
+        # `_adaptive_candidate_pool` already documents for probing with CBFE off.
+        candidates = _adaptive_candidate_pool(
+            ligands, pairs, mapper_obj, scorer_obj, planner_obj, mapping_options, network_options
         )
-    if network_options.pair_evaluation == "adaptive":
-        logger.info("Planner %r requires eager candidate evaluation; mapping the full pool", planner_obj.name)
+    else:
+        if network_options.pair_evaluation == "adaptive":
+            logger.info("Planner %r requires eager candidate evaluation; mapping the full pool", planner_obj.name)
+        candidates = evaluate_pairs(ligands, pairs, mapper_obj, scorer_obj, mapping_options, network_options)
+        n_feasible = sum(1 for c in candidates if c.feasible)
+        logger.info("%d of %d candidate(s) are feasible", n_feasible, len(candidates))
 
     candidates = evaluate_pairs(ligands, pairs, mapper_obj, scorer_obj, mapping_options, network_options)
     n_feasible = sum(1 for c in candidates if c.feasible)
@@ -511,4 +1092,6 @@ def build_network(
 
     return maybe_apply_graph_consistency(
         planner_obj.plan(ligands, candidates, network_options), network_options, scorer=scorer_obj
+    return _plan_over_augmented_pool(
+        ligands, candidates, mapper_obj, scorer_obj, planner_obj, mapping_options, network_options
     )

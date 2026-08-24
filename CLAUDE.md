@@ -20,8 +20,8 @@ sphinx-build -W -b html docs/source docs/build/html
 | Path | |
 |---|---|
 | `core/` | The algorithms. Depends only on rdkit/networkx/numpy/scipy, and never on `plugins/`. |
-| `core/meta/` | The four plugin ABCs, importable with no optional dependency present. |
-| `plugins/{mappers,scorers,planners,exporters}/` | Implementations plus their `PluginSpec` tables. |
+| `core/meta/` | The five plugin ABCs, importable with no optional dependency present. |
+| `plugins/{mappers,scorers,planners,exporters,intermediates}/` | Implementations plus their `PluginSpec` tables. |
 | `io/`, `viz/`, `cli/` | Loaders and network JSON, depictions, argparse. |
 | `tests/conftest.py` | `Dummy*` plugins and the co-posed ligand factories — read it before writing a test. |
 
@@ -55,6 +55,21 @@ bumps land as their own commit.
 each ligand's core across its selected RBFE edges, re-repairs to a fixed point, and re-costs
 the reduced edges (`core/consistency.py`). It never re-selects, and it *raises* when the
 reduced core leaves a selected edge infeasible rather than reverting that edge.
+**A synthetic ligand is an ordinary vertex.** An intermediate generator proposes molecules
+and nothing else; the in-place `core_rmsd` gate on its `A~M` and `M~B` sub-edges is the
+*only* thing that certifies its pose. Don't add a second check, and don't trust a
+generator's own opinion of its output — a `ProposedLink.hint` is advisory and must never
+reach an `EdgeScore.total`. A badly posed intermediate is meant to come back as an ordinary
+`core_geometry_mismatch` and be dropped whole, molecules included.
+
+**An invented ligand needs a structure on disk.** `edges.dat` names residues and
+amberstudio needs a topology for each; the user has never seen the synthetic ones. The
+Amber exporter writes `ligands/<name>.sdf` for every ligand plus an `intermediates.txt`
+manifest. If you touch that exporter, keep the invariant — every name in `edges.dat` has a
+file in `ligands/` — and the test that asserts it.
+
+**`--consistency graph` is a declared no-op.** It exists in `NetworkOptions` and the CLI and
+is read by nothing. Don't reach for it and don't assume it constrains anything.
 
 **`examples/data/benzamides.sdf` is gitignored**; regenerate it with
 `python examples/data/make_conformers.py`.
@@ -72,4 +87,4 @@ Load the skill when a task lands in its area:
 
 - `rbfenet-softcore` — the soft-core repair: invariants, closure rules, how to test one.
 - `rbfenet-planning` — edge selection, connectivity and cycle budgets, CBFE eligibility.
-- `rbfenet-plugins` — adding a mapper, scorer, planner, or exporter.
+- `rbfenet-plugins` — adding a mapper, scorer, planner, exporter, or intermediate generator.

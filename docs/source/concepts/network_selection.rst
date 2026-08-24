@@ -668,6 +668,95 @@ The level is recorded in the network JSON as ``options.compat``, so a planned ne
 states which behaviour produced it. A network planned without the flag writes no such key
 at all, leaving its output byte-for-byte what it was before the flag existed.
 
+Intermediate ligands
+--------------------
+
+Some pairs cannot be related by any mapping: the soft-core would be too large, the cores
+too dissimilar, the geometry irreconcilable. ``intermediates.mode`` lets the planner
+*invent* a molecule that sits between them, turning one impossible edge into two possible
+ones. It is off by default.
+
+The molecules themselves -- which generator proposes them, how they are posed, what
+certifies the pose, and what an export has to carry -- are :doc:`intermediates`. This
+section is about the *stage*: which gaps reach a generator, and how the result interacts
+with every other knob.
+
+``off``
+   Never. No generator is even constructed, so a run that does not ask for intermediates
+   never imports one.
+
+``bridge``
+   Only for pairs whose endpoints fall in different components of the feasible pool. This
+   is the mode that turns a hard connectivity failure into a planned network.
+
+``gaps``
+   Everything ``bridge`` does, and additionally infeasible pairs *inside* a component.
+   Those ends are already joined by some path, so an intermediate there buys accuracy
+   rather than connectivity.
+
+The stage sits between scoring and planning -- **map, repair, score, bridge, plan** -- and
+runs once over the settled candidate pool. Under adaptive evaluation it runs after the
+loop settles, never inside it: generating mid-loop would satisfy connectivity with
+invented vertices and stop the RBFE expansion the loop exists to drive.
+
+The generator proposes; nothing else
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Every sub-edge a generator proposes goes through the same
+:func:`~rbfenetmap.core.pipeline.build_candidate` as any other pair, with the user's own
+mapper, scorer, and soft-core policy. Nothing fabricates a transformation the way a
+counterpoised edge legitimately is fabricated, and the difference is not stylistic: a CBFE
+edge has no geometry to check, while an intermediate edge is nothing *but* geometry. A
+badly posed molecule therefore comes back as an ordinary ``core_geometry_mismatch``.
+
+A proposal is accepted or dropped **whole**. If the surviving feasible sub-edges do not
+actually connect the two ends of the gap, the invented molecules go with it -- there is no
+such thing as a partially useful intermediate, and an orphan synthetic vertex is a ligand
+nobody can compute a free energy for. This is the direct analogue of "an edge that cannot
+be repaired is rejected, not mutated".
+
+Every attempt, successful or not, is recorded on ``network.intermediates``; every accepted
+molecule carries a :class:`~rbfenetmap.core.models.LigandProvenance` naming its parents,
+the generator, and the pose RMSD.
+
+Against the other knobs
+~~~~~~~~~~~~~~~~~~~~~~~
+
+``cbfe_mode``
+   **Intermediates win, and this takes no precedence logic at all.** CBFE eligibility is
+   evaluated inside the planner, against the components of the pool it was handed.
+   Generation runs before the planner and changes that pool, so a gap an intermediate
+   closed is no longer a gap when components are computed and CBFE never triggers for it;
+   a gap it could not close is still a gap, and ``cbfe_mode="bridge"`` still rescues it.
+   That is *stay relative, fall back to counterpoised, only then fail* -- for free, from
+   stage order.
+
+``n_edges``
+   **The budget is spent, never inflated.** Each accepted intermediate is another vertex,
+   so spanning needs one more edge. Generation is given the headroom
+   ``n_edges - (n_ligands - 1)`` and stops when it runs out, recording
+   ``n_edges=12 left no room for intermediates; 2 gap(s) were not bridged`` on
+   ``unmet_constraints``. It does not raise: unlike a spanning tree that cannot fit, an
+   intermediate that cannot fit still leaves a valid network.
+
+``edges_per_ligand`` / ``min_cycle_coverage``
+   Synthetic vertices are excluded from the degree target and from the coverage
+   denominator -- the user asked for two edges per compound whose affinity they care
+   about, and an intermediate is scaffolding. They are **not** forbidden from carrying
+   cycles: ``A-M1-B-M2-A`` is a genuine consistency check on the real pair.
+
+``banned_edges``
+   A banned pair is never offered to a generator. ``A-M-B`` is a way of running exactly
+   the comparison the ban forbade, at twice the cost.
+
+``forced_edges``
+   A forced pair with no feasible mapping *is* offered, whatever the mode: the user
+   demanded that comparison, and an intermediate is the only way to keep it relative.
+
+``require_connected``
+   Generation runs either way. If a disconnection survives it, the refusal names the mode
+   and lists each gap that was offered along with why it was refused.
+
 Knob precedence
 ---------------
 
@@ -703,6 +792,11 @@ Knob precedence
      - A **feasibility** knob applied during repair: it changes the candidate pool, not
        the selection. Tightening it can disconnect the pool, which then errors at (3).
    * - 8
+     - ``intermediates.mode``
+     - Widens the pool by adding **vertices**, not just edges. Applied after scoring and
+       before selection, so a gap is offered to a generator only once the real pool is
+       exhausted for it. The only knob here that changes the vertex set.
+   * - 9
      - ``cbfe_mode``
      - Widens the pool rather than steering selection. Applied *before* cost competition,
        so it can rescue (3) without ever displacing a feasible RBFE edge.

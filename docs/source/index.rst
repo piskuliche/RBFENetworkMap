@@ -17,6 +17,7 @@ most one connected soft-core region per side.**
    concepts/scoring
    concepts/network_selection
    concepts/replanning
+   concepts/intermediates
    cli
    plugins
 

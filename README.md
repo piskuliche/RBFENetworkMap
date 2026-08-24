@@ -107,6 +107,7 @@ The feasible candidate graph is disconnected: 2 components.
 | `--cbfe {off,bridge,cycles,all}` | Use counterpoised edges, which need no atom mapping and so are available between *any* two ligands. See below. |
 | `--design {none,a_optimal,d_optimal}` | Select edges by a statistical criterion instead of by cost, using the `optimal` planner. Needs `--scorer variance`, whose totals are predicted standard deviations in kcal/mol. Prefer `d_optimal` when a cycle-closure correction will be applied downstream. See below. |
 | `--design-total-ns` | Split a simulation budget A-optimally across the selected edges and write it into each Amber `.runconfig`. |
+| `--intermediates {off,bridge,gaps}` | Invent a bridging ligand for pairs no mapping can relate, turning one impossible edge into two possible ones. The invented molecule is posed against its parents and its sub-edges face the same feasibility checks as any other edge; a proposal whose sub-edges do not survive is dropped whole, molecules included. Budgeted out of `--n-edges`, never on top of it. See below. |
 | `--progress` / `--no-progress` | Show or suppress pair-mapping progress. Interactive CLI runs show it automatically. |
 | `--forced-edge` / `--banned-edge` | Absolute. A forced edge bypasses scoring but not feasibility. |
 | `--max-softcore-atoms` | A *feasibility* knob: it changes the candidate pool, not the selection. |
@@ -239,6 +240,45 @@ rbfenet replan --network network.json --lmi lmi.json --lmi-quantile 0.9 --out re
 
 The LMI file is a small JSON schema of this package's own (`{"lig_a~lig_b": 0.31, ...}`);
 reading edgembar's on-disk output directly is a follow-up.
+## Intermediate ligands
+
+Some pairs cannot be related by any mapping. `--intermediates` lets the pipeline *invent* a
+molecule that sits between them, turning one impossible edge into two possible ones.
+
+```bash
+rbfenet plan --ligands ligands.sdf --intermediates bridge --export amber --out network.json
+```
+
+**Be clear about what this buys.** IMERGE measured paths through an intermediate converging
+roughly **20% more slowly** than the direct path: two calculations replace one, and neither
+is free. The win is not speed and it is not accuracy on a pair that already works. It is
+the pairs where **the direct path does not converge at all**, where the choice is not "one
+calculation or two" but "two calculations or no comparison". Hence `off` by default, and
+`bridge` — only gaps that actually disconnect the network — before `gaps`.
+
+The default generator is `pairmap`, after
+[Furui *et al.*, *JCIM* 2025, 65, 705–721](https://doi.org/10.1021/acs.jcim.4c01634)
+(reference implementation [ohuelab/PairMap](https://github.com/ohuelab/PairMap), CC-BY;
+this implementation is re-derived from the paper, not adapted from that code). It emits a
+small *subnetwork* rather than a chain — the cheapest path from one parent to the other,
+plus what it takes to put each of its links in a short cycle. The smallest shape is
+`A–M1–B–M2–A`: two independent routes across a pair that had no direct edge at all, whose
+closure error is a real consistency check. `fragment-swap` is the simple alternative: one
+hybrid per differing position, no search.
+
+Everything a generator proposes is judged by the machinery that judges every other edge.
+The molecule is posed against its parents, and its `A~M` and `M~B` sub-edges go through the
+same mapper, scorer, and soft-core policy — a badly posed intermediate comes back as an
+ordinary `core_geometry_mismatch` and the whole proposal is dropped, molecules included, so
+there are never orphan synthetic vertices.
+
+An invented ligand is a molecule nobody has seen and nobody has parameterised, and the
+outputs say so. The Amber export writes `ligands/<name>.sdf` for every ligand plus an
+`intermediates.txt` manifest of `<name> <parent> <parent> <generator>`, so every name in
+`edges.dat` has a structure beside it; `--validate-exporter amber` warns about the count
+before the mapping run. The HTML report draws them with a dashed outline and a `SYN` badge,
+counts them separately from the real ligands, and lists each one's parents, generator and
+pose RMSD. `network.intermediates` records every gap attempted, bridged or not.
 
 ## Python API
 
@@ -264,11 +304,13 @@ Exporters adapt a planned network to a downstream consumer without that consumer
 concerns reaching back into the core:
 
 - `amber` — `edges.dat` plus one `atommap_<src>~<dst>.runconfig` per edge, in the layout
-  `amberstudio`'s `BuildEdges` produces and `guimapper` edits.
+  `amberstudio`'s `BuildEdges` produces and `guimapper` edits, plus `ligands/<name>.sdf` for
+  every ligand so no name in `edges.dat` lacks a structure, and `intermediates.txt` when any
+  were invented.
 - `json` — the round-trippable native format, including rejected candidates.
 - `edgelist`, `graphml`, `html` (a self-contained report with depictions).
 
-Adding your own is a `PluginSpec` plus a class implementing one of the four ABCs in
+Adding your own is a `PluginSpec` plus a class implementing one of the five ABCs in
 `rbfenetmap.core.meta`. Registration is metadata only — nothing is imported until the
 plugin is actually used, which is why `rbfenet plugins --all` can report on backends that
 are not installed.

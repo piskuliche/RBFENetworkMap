@@ -1,12 +1,13 @@
 ---
 name: rbfenet-plugins
-description: Adding or modifying a mapper, scorer, planner, or exporter in rbfenetmap — the PluginSpec registry, the four ABCs in core/meta, lazy imports, and optional-dependency handling. Use when extending the pipeline or when a plugin is unavailable or fails to register.
+description: Adding or modifying a mapper, scorer, planner, exporter, or intermediate generator in rbfenetmap — the PluginSpec registry, the five ABCs in core/meta, lazy imports, and optional-dependency handling. Use when extending the pipeline or when a plugin is unavailable or fails to register.
 ---
 
 # Adding a plugin
 
-Four kinds — `mapper`, `scorer`, `planner`, `exporter` — each an ABC in `core/meta/` with
-implementations under `plugins/<kind>s/`. The registry (`core/pluginregistry.py`) is adapted
+Five kinds — `mapper`, `scorer`, `planner`, `exporter`, `intermediate` — each an ABC in
+`core/meta/` with implementations under `plugins/<kind>s/`. The registry
+(`core/pluginregistry.py`) is adapted
 from `pharmaforge.core.pluginregistry`; keep the two recognisably the same mechanism.
 
 ## The rule everything else follows from
@@ -56,10 +57,40 @@ and will catch an eager backend import. A test that needs an uninstalled backend
 `@pytest.mark.optional_dep`; anything genuinely slow gets `@pytest.mark.slow`. Prefer the
 `Dummy*` plugins in `conftest.py` for everything downstream of the plugin boundary.
 
+## Intermediate generators specifically
+
+The one kind whose output changes the *ligand set*, not the network over it. It proposes
+molecules and nothing else: `ProposedMolecule.mol` carries **no conformer** (posing is
+centralised in `core/posing.py`, and a `ProposedMolecule` strips any conformer it is
+handed), `ProposedLink.hint` is advisory and must never reach an `EdgeScore.total`, and
+`IntermediateProposal.rejection` is a plain `str` — `RejectionReason` is the vocabulary of
+*edge* feasibility and is not reused here.
+
+A generator that knows where its atoms belong says so with a complete `parent_atom_map`,
+which spares the poser a `GetSubstructMatch` whose symmetry it would have to resolve by
+guessing. Posing failures are data: `pose_intermediate` returns a `PoseResult` carrying a
+`PoseRejection`, never an exception.
+
+Two are built in. `pairmap` (default) searches a subnetwork of R-group recombinations;
+`fragment-swap` emits one hybrid per differing position and is the `IdentityMapper` of this
+kind. Both share `plugins/intermediates/_rgroups.py`, which owns the MCS core (symmetry
+resolved by in-place RMSD, never by whichever embedding came back first) and the
+combine-and-delete molecule construction that yields an exact `parent_atom_map`. Reuse it
+rather than re-deriving a decomposition: two copies that drifted would mean two generators
+disagreeing about what a molecule *is* while both looked correct alone.
+
+A generator's *numeric* knobs belong on `IntermediateOptions`, not on the generator, because
+they have to be serialized with the network for an invented ligand to be reproducible.
+`describe_parameters()` is a report, not a record — put what the algorithm *does* there, not
+a second copy of the constants that drove it.
+
 ## Exporters specifically
 
 An exporter adapts a network to a downstream consumer without that consumer's concerns
 reaching back into the core — keep format-specific logic entirely inside the exporter.
 `export()` returns the paths it wrote. The Amber exporter splits `rbfe/` and `cbfe/`
 subdirectories because amberstudio's `BuildEdges` takes `alchemical_mode` per invocation
-rather than per edge.
+rather than per edge, and writes `ligands/<name>.sdf` for **every** ligand plus an
+`intermediates.txt` manifest — keep the invariant that every name in `edges.dat` has a file
+in `ligands/`, because a residue with no topology fails deep inside somebody else's tooling
+hours later.

@@ -182,7 +182,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # plugins ------------------------------------------------------------------
     plugins = subparsers.add_parser("plugins", help="List plugins and their availability.")
-    plugins.add_argument("--kind", choices=("mapper", "scorer", "planner", "exporter"))
+    plugins.add_argument("--kind", choices=("mapper", "scorer", "planner", "exporter", "intermediate"))
     plugins.add_argument("--all", action="store_true", help="Include plugins whose backends are missing.")
 
     # inspect ------------------------------------------------------------------

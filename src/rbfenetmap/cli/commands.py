@@ -365,6 +365,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
     if network.cbfe_edges:
         summary += f"\n  {len(network.rbfe_edges)} RBFE, {len(network.cbfe_edges)} CBFE"
     summary += "\n  " + _cost_line(network, getattr(args, "cost_units", "score"))
+    if network.synthetic_ligands:
+        # Named, not counted. An invented vertex is a molecule the user must parameterise
+        # and simulate, so "3 intermediates" is not something anyone can act on.
+        invented = ", ".join(ligand.name for ligand in network.synthetic_ligands)
+        summary += f"\n  {len(network.synthetic_ligands)} invented ligand(s): {invented}"
     print(summary)
     # Advice, not a warning: with edges_per_ligand=2 the default network is always below
     # the n*ln(n) floor, so warnings.warn would fire on every run this package has ever
@@ -593,6 +598,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 def cmd_plugins(args: argparse.Namespace) -> int:
     """List registered plugins and their availability."""
     from rbfenetmap.plugins.exporters import BUILTIN_EXPORTERS
+    from rbfenetmap.plugins.intermediates import BUILTIN_INTERMEDIATES
     from rbfenetmap.plugins.mappers import BUILTIN_MAPPERS
     from rbfenetmap.plugins.planners import BUILTIN_PLANNERS
     from rbfenetmap.plugins.scorers import BUILTIN_SCORERS
@@ -602,6 +608,7 @@ def cmd_plugins(args: argparse.Namespace) -> int:
         "scorer": BUILTIN_SCORERS,
         "planner": BUILTIN_PLANNERS,
         "exporter": BUILTIN_EXPORTERS,
+        "intermediate": BUILTIN_INTERMEDIATES,
     }
     kinds = [args.kind] if args.kind else list(tables)
 

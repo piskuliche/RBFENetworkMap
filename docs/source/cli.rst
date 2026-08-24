@@ -59,6 +59,8 @@ clusters instead:
 To select edges by a statistical criterion rather than by cost, use the ``optimal`` planner
 with the ``variance`` scorer -- the one scorer whose totals are predicted standard
 deviations in kcal/mol, which is the scale the criterion is built on:
+To try inventing a bridging ligand *before* falling back to counterpoised edges, add
+``--intermediates``:
 
 .. code-block:: bash
 
@@ -89,6 +91,26 @@ nanosecond allocation, bounded by ``--design-lambda-min`` / ``--design-lambda-ma
 ``--design-refine`` adds a Fedorov exchange pass. See
 :doc:`concepts/network_selection` -- including the warning that optimal design buys
 precision and does not promise accuracy.
+                --intermediates bridge --cbfe bridge \
+                --out network.json
+
+The two compose without any precedence rule: generation runs before selection, so a gap
+an invented ligand closed is no longer a gap when CBFE eligibility is evaluated, and one
+it could not close is still rescued by ``--cbfe bridge``. ``--intermediates gaps``
+additionally offers infeasible pairs *inside* a connected component.
+``--max-intermediates``, ``--max-intermediate-gaps`` and ``--intermediates-per-gap`` bound
+the work; ``--intermediate-generator`` chooses the plugin, defaulting to ``pairmap``. The
+subnetwork search is tuned with ``--intermediate-min-link-score``,
+``--intermediate-max-dist``, ``--intermediate-max-cycle``,
+``--intermediate-max-subgraph-dist`` and ``--intermediate-beta``, whose names and defaults
+are the paper's. Every attempt is recorded in the network JSON, and every invented ligand
+carries the parents, generator and pose RMSD it was built from.
+
+An invented ligand is a residue nobody has parameterised, so ``--export amber`` writes
+``ligands/<name>.sdf`` for every ligand and an ``intermediates.txt`` manifest, and
+``--validate-exporter amber`` warns about the count before the mapping run rather than
+after. See :doc:`concepts/intermediates` for the generator and
+:doc:`concepts/network_selection` for the stage.
 
 ``--pair-evaluation adaptive`` fingerprint-ranks the all-pairs pool and maps it in
 batches. It first evaluates each ligand's nearest neighbours, then prioritizes pairs

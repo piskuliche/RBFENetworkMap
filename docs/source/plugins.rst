@@ -1,7 +1,7 @@
 Plugins
 =======
 
-Four plugin kinds, each an abstract base class in :mod:`rbfenetmap.core.meta`:
+Five plugin kinds, each an abstract base class in :mod:`rbfenetmap.core.meta`:
 
 .. list-table::
    :header-rows: 1
@@ -21,6 +21,18 @@ Four plugin kinds, each an abstract base class in :mod:`rbfenetmap.core.meta`:
    * - exporter
      - Serialize for a downstream program
      - ``json``, ``edgelist``, ``graphml``, ``amber``, ``html``
+   * - intermediate
+     - Invent a ligand bridging a gap
+     - ``pairmap``, ``fragment-swap``
+
+The intermediate generator is the only kind whose output changes the *ligand set* rather
+than the network over it. Its contract is correspondingly narrow: it proposes molecules
+and nothing else. Posing them is
+:func:`rbfenetmap.core.posing.pose_intermediate`'s job, deciding whether the resulting
+edges are feasible is the repair's, and pricing them is the scorer's -- each of those
+already has an owner, and a generator that took one over would make an intermediate's
+quality depend on which generator happened to invent it. See
+:doc:`concepts/intermediates` for what the two built-in generators actually do.
 
 Lazy registration
 -----------------

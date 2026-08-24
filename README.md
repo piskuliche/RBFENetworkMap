@@ -119,6 +119,12 @@ Selection guarantees a spanning network **iff** the feasible candidate graph is
 connected: the MST is built first, the redundancy pass only ever adds, and conflicting
 budgets are rejected up front rather than by trimming the tree.
 
+What these knobs actually cost is measured rather than asserted: `examples/06_variant_matrix.py`
+plans the shipped 16-ligand Tyk2 series 21 different ways and builds a side-by-side page
+over the results, published in the docs as
+[the Tyk2 variant matrix](https://piskuliche.github.io/RBFENetworkMap/variant_matrix.html).
+Every report there regenerates byte-identically from a current checkout.
+
 ## Statistical optimal design
 
 The Fisher information matrix of a network of relative measurements **is** its weighted

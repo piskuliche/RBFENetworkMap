@@ -18,6 +18,7 @@ most one connected soft-core region per side.**
    concepts/network_selection
    concepts/replanning
    concepts/intermediates
+   variant_matrix
    cli
    plugins
 

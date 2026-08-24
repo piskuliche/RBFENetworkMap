@@ -65,8 +65,10 @@ intersphinx_mapping = {
 templates_path: list[str] = []
 exclude_patterns: list[str] = []
 
+# Carries the Tyk2 variant matrix: 21 self-contained planning reports plus their index,
+# copied verbatim into the build. Regenerate with examples/06_variant_matrix.py.
 html_theme = "sphinx_rtd_theme" if _available("sphinx_rtd_theme") else "alabaster"
-html_static_path: list[str] = []
+html_static_path = ["_static"]
 
 copybutton_prompt_text = r">>> |\.\.\. |\$ |In \[\d*\]: | {2,5}\.\.\.: | {5,8}: "
 copybutton_prompt_is_regexp = True

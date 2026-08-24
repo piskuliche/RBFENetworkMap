@@ -51,6 +51,14 @@ Optimal design
 --------------
 
 .. automodule:: rbfenetmap.core.design
+.. automodule:: rbfenetmap.core.consistency
+
+Surgery and diagnostics
+-----------------------
+
+.. automodule:: rbfenetmap.core.surgery
+
+.. automodule:: rbfenetmap.core.replanning
 
 Plugin registry
 ---------------

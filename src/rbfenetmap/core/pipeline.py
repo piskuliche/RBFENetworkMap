@@ -22,6 +22,7 @@ from typing import Callable, Mapping, Sequence
 import networkx as nx
 
 from rbfenetmap.core.cbfe import build_cbfe_pool, make_cbfe_transformation
+from rbfenetmap.core.consistency import maybe_apply_graph_consistency
 from rbfenetmap.core.descriptors import compute_descriptors
 from rbfenetmap.core.exceptions import MappingError, RepairError
 from rbfenetmap.core.meta.mappers import AbstractMapper
@@ -475,7 +476,12 @@ def build_network(
         # is the difference between minutes and milliseconds.
         candidates = _all_cbfe_candidates(ligands, network_options)
         logger.info("cbfe_mode='all': planning over %d counterpoised candidate(s), no mapping", len(candidates))
-        return planner_obj.plan(ligands, candidates, network_options)
+        # A counterpoised network has no common cores to make consistent, so the gate is a
+        # no-op here. It is still called, because a path out of this function that skips it
+        # is how the option came to mean nothing on some routes and something on others.
+        return maybe_apply_graph_consistency(
+            planner_obj.plan(ligands, candidates, network_options), network_options, scorer=scorer_obj
+        )
 
     mapper_obj = create_mapper(mapper) if isinstance(mapper, str) else mapper
 
@@ -489,8 +495,12 @@ def build_network(
     logger.info("Evaluating %d candidate pair(s) with mapper %r", len(pairs), mapper_obj.name)
 
     if network_options.pair_evaluation == "adaptive" and planner_obj.name == "mst":
-        return evaluate_pairs_adaptively(
-            ligands, pairs, mapper_obj, scorer_obj, planner_obj, mapping_options, network_options
+        return maybe_apply_graph_consistency(
+            evaluate_pairs_adaptively(
+                ligands, pairs, mapper_obj, scorer_obj, planner_obj, mapping_options, network_options
+            ),
+            network_options,
+            scorer=scorer_obj,
         )
     if network_options.pair_evaluation == "adaptive":
         logger.info("Planner %r requires eager candidate evaluation; mapping the full pool", planner_obj.name)
@@ -499,4 +509,6 @@ def build_network(
     n_feasible = sum(1 for c in candidates if c.feasible)
     logger.info("%d of %d candidate(s) are feasible", n_feasible, len(candidates))
 
-    return planner_obj.plan(ligands, candidates, network_options)
+    return maybe_apply_graph_consistency(
+        planner_obj.plan(ligands, candidates, network_options), network_options, scorer=scorer_obj
+    )

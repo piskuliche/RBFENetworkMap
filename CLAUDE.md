@@ -51,8 +51,10 @@ files CI is happy with.
 before building — deliberately, since PyPI will not let a wrong version be replaced. Version
 bumps land as their own commit.
 
-**`--consistency graph` is a declared no-op.** It exists in `NetworkOptions` and the CLI and
-is read by nothing. Don't reach for it and don't assume it constrains anything.
+**`--consistency graph` is a post-selection pass, not a feasibility knob.** It intersects
+each ligand's core across its selected RBFE edges, re-repairs to a fixed point, and re-costs
+the reduced edges (`core/consistency.py`). It never re-selects, and it *raises* when the
+reduced core leaves a selected edge infeasible rather than reverting that edge.
 
 **`examples/data/benzamides.sdf` is gitignored**; regenerate it with
 `python examples/data/make_conformers.py`.

@@ -98,6 +98,51 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--dest", type=Path, default=Path("."), help="Output directory.")
     export.add_argument("--exporter-opt", action="append", metavar="K=V", help="Exporter option, repeatable.")
 
+    # replan -------------------------------------------------------------------
+    # No ligand, mapping, or soft-core flags: replanning maps nothing. It selects a new
+    # network from the candidate pool the original run already scored and stored, which is
+    # what makes it cheap enough to run after every analysis.
+    replan = subparsers.add_parser("replan", help="Prune high-LMI edges from a planned network and replan the gaps.")
+    replan.add_argument("--network", type=Path, required=True, help="Network JSON from `rbfenet plan`.")
+    replan.add_argument(
+        "--lmi",
+        type=Path,
+        required=True,
+        help=(
+            "JSON mapping 'lig_a~lig_b' to a Lagrange Multiplier Index, as produced from an "
+            "edgembar network analysis. See the replanning guide for the format; this is the "
+            "package's own small schema, not edgembar's on-disk output."
+        ),
+    )
+    cut = replan.add_mutually_exclusive_group()
+    cut.add_argument("--lmi-threshold", type=float, metavar="F", help="Prune edges with an LMI strictly above F.")
+    cut.add_argument(
+        "--lmi-quantile",
+        type=float,
+        default=0.9,
+        metavar="Q",
+        help="Prune edges above this quantile of the observed LMIs (default: %(default)s).",
+    )
+    replan.add_argument(
+        "--max-pruned", type=int, metavar="N", help="Prune at most the N worst edges, whatever the cut selects."
+    )
+    replan.add_argument(
+        "--allow-missing-lmi",
+        action="store_true",
+        help="Treat a selected edge with no LMI value as beyond reproach instead of failing.",
+    )
+    replan.add_argument(
+        "--reselect",
+        action="store_true",
+        help=(
+            "Re-select the whole network over the pruned pool instead of holding the surviving "
+            "edges in place. Right before anything has been submitted; after that it can move "
+            "edges that are already set up or running."
+        ),
+    )
+    replan.add_argument("--planner", default="mst", help="Planner used for the replan (default: %(default)s).")
+    replan.add_argument("--out", type=Path, default=Path("replanned.json"), help="Replanned network JSON path.")
+
     # report -------------------------------------------------------------------
     report = subparsers.add_parser("report", help="Render a self-contained HTML report.")
     report.add_argument("--network", type=Path, required=True, help="Network JSON from `rbfenet plan`.")
@@ -157,6 +202,7 @@ _HANDLERS = {
     "score": commands.cmd_score,
     "map": commands.cmd_map,
     "export": commands.cmd_export,
+    "replan": commands.cmd_replan,
     "report": commands.cmd_report,
     "plugins": commands.cmd_plugins,
     "inspect": commands.cmd_inspect,

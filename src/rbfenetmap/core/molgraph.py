@@ -29,6 +29,7 @@ __all__ = (
     "node_weighted_steiner",
     "ring_systems",
     "acyclic_branches",
+    "stranded_components",
 )
 
 
@@ -93,6 +94,35 @@ def connected_components_of(graph: nx.Graph, nodes: Iterable[int]) -> list[set[i
     node_set = set(nodes)
     components = [set(c) for c in nx.connected_components(graph.subgraph(node_set))]
     return sorted(components, key=lambda c: (-len(c), min(c)))
+
+
+def stranded_components(graph: nx.Graph, removed: Iterable[int]) -> set[int]:
+    """Return the nodes that *removed* cuts off from the graph's main body.
+
+    Deleting *removed* may split the remainder into several pieces. The largest is taken
+    to be the main body and every other piece is "stranded" -- reachable from the rest of
+    the graph only by passing through *removed*.
+
+    Determinism comes from :func:`connected_components_of`, which orders by size and then
+    by smallest member, so an exact tie in size resolves the same way on every run and in
+    every networkx version. That matters: the caller uses this to decide which atoms move
+    into a soft-core, and a report that reshuffled between runs would not be diffable.
+
+    Parameters
+    ----------
+    graph : networkx.Graph
+    removed : Iterable[int]
+        Nodes to delete before looking for components.
+
+    Returns
+    -------
+    set[int]
+        The union of every component but the largest. Empty when *removed* leaves the
+        remainder connected, which is the ordinary case.
+    """
+    remainder = set(graph.nodes) - set(removed)
+    components = connected_components_of(graph, remainder)
+    return set().union(*components[1:]) if len(components) > 1 else set()
 
 
 def component_beyond_bond(graph: nx.Graph, keep: int, start: int) -> set[int]:

@@ -246,6 +246,27 @@ def benzamides() -> dict[str, Ligand]:
 
 
 @pytest.fixture(scope="session")
+def anilides() -> dict[str, Ligand]:
+    """A co-posed series differing only in the acyl group.
+
+    Mirrors the Tyk2 `ejm42`/`ejm43`/`ejm44`/`ejm55` sub-series, which is where the
+    stranded-core case was first seen on real input. The MCS keeps a terminal methyl in
+    the common core while the atom joining it to the rest of the core goes soft, so the
+    soft-core becomes a bridge rather than a substituent. The benzamides cannot show this
+    -- they differ at a ring position, where nothing lies beyond the substituent to strand.
+    """
+    return make_coposed(
+        {
+            "an_piv": "CC(C)(C)C(=O)Nc1ccccc1",
+            "an_ibu": "CC(C)C(=O)Nc1ccccc1",
+            "an_prop": "CCC(=O)Nc1ccccc1",
+            "an_carb": "COC(=O)Nc1ccccc1",
+        },
+        "O=CNc1ccccc1",
+    )
+
+
+@pytest.fixture(scope="session")
 def disubstituted() -> dict[str, Ligand]:
     """A co-posed pair differing at *two* ring positions.
 

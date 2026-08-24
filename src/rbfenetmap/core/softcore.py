@@ -13,6 +13,15 @@ join up. Choosing which atoms to demote is a node-weighted Steiner tree problem:
 soft-core fragments are the terminals, the bond graph is the network, and the cost of
 recruiting an atom is how much soft-core that recruitment ultimately drags in.
 
+A second kind of demotion has nothing to do with fragmentation. The mapper may keep an
+atom in the common core that is reachable from the rest of the core *only* through the
+soft-core -- a terminal methyl retained while the carbon joining it goes soft. The
+soft-core is then a bridge, ``core -- soft-core -- core``, and attaches by two bonds
+however connected it is. Such a *stranded* fragment is absorbed into the soft-core, which
+restores the single-attachment invariant at the cost of a few atoms. It is not a closure
+rule: it is checked and applied in the same loop as Steiner recruitment, because bridging
+two regions can strand a fragment that was not stranded before.
+
 Three closure rules run to a fixpoint after every recruitment:
 
 **(a) whole-ring** -- a ring is never left half soft-core. Touching one ring atom absorbs
@@ -48,6 +57,7 @@ from rbfenetmap.core.molgraph import (
     mol_to_graph,
     node_weighted_steiner,
     ring_systems,
+    stranded_components,
 )
 from rbfenetmap.core.options import SoftcorePolicy
 
@@ -376,8 +386,9 @@ def repair_softcore_connectivity(
     -----
     The loop terminates in at most ``n_atoms_1 + n_atoms_2`` iterations. Both soft-core
     sets grow monotonically within finite atom sets, and any iteration that does not
-    return adds at least one atom, because a bridge joining two or more fragments must
-    contain an atom that is not already soft-core.
+    return adds at least one atom: a bridge joining two or more fragments must contain an
+    atom that is not already soft-core, and an iteration entered only because something
+    was stranded absorbs a non-empty component.
     """
     policy = policy or SoftcorePolicy()
     context = RepairContext.build(source, target, mapping, policy)
@@ -404,7 +415,9 @@ def repair_softcore_connectivity(
     for iterations in range(1, max_iterations + 1):
         fragments_1 = detect_fragments(context.graph_1, softcore_1)
         fragments_2 = detect_fragments(context.graph_2, softcore_2)
-        if len(fragments_1) <= 1 and len(fragments_2) <= 1:
+        stranded_1 = stranded_components(context.graph_1, softcore_1)
+        stranded_2 = stranded_components(context.graph_2, softcore_2)
+        if len(fragments_1) <= 1 and len(fragments_2) <= 1 and not stranded_1 and not stranded_2:
             iterations -= 1  # the final pass only confirmed the result; it changed nothing
             break
 
@@ -423,6 +436,19 @@ def repair_softcore_connectivity(
                 f"iter {iterations} side {side}: bridged {len(fragments)} regions by demoting "
                 f"{len(recruited)} atom(s) {sorted(recruited)}" + (" [steiner:approximate]" if approximate else "")
             )
+
+        # Recomputed rather than reusing the sets from the top of the loop: recruiting a
+        # Steiner bridge changes which side of the soft-core an atom sits on, so it can
+        # both create and clear strandings within this one iteration.
+        for side, current in ((1, softcore_1), (2, softcore_2)):
+            graph, _, _, _ = context.side(side)
+            stranded = stranded_components(graph, current)
+            if stranded:
+                current |= stranded
+                trace.append(
+                    f"iter {iterations} side {side}: absorbed {len(stranded)} core atom(s) "
+                    f"{sorted(stranded)} stranded behind the soft-core"
+                )
 
         closed_1, closed_2 = joint_closure(softcore_1, softcore_2, context)
         grown = (len(closed_1) - len(softcore_1), len(closed_2) - len(softcore_2))

@@ -17,6 +17,7 @@ from rbfenetmap.core.cbfe import (
     cbfe_cost,
     component_centrality,
     make_cbfe_transformation,
+    select_bridges,
     select_cbfe_bridges,
 )
 from rbfenetmap.core.models import EdgeKind
@@ -174,6 +175,67 @@ class TestBridgeSelection:
         graph = nx.Graph()
         graph.add_nodes_from(benzamides)
         assert select_cbfe_bridges(graph, benzamides, {}) == []
+
+
+class TestPartitionBridges:
+    """:func:`select_bridges` with a partition that is *not* the connected components.
+
+    This is the seam clustered planning uses. The connectivity case is covered above
+    through :func:`select_cbfe_bridges`; what matters here is that an arbitrary partition
+    behaves the same way, and that ``n_per_pair`` buys the extra crossings that put a
+    bridge on a cycle.
+    """
+
+    @staticmethod
+    def _two_groups(benzamides):
+        """A partition of the benzamides into two groups, and a pool spanning every pair."""
+        names = sorted(benzamides)
+        partition = {name: int(index >= 2) for index, name in enumerate(names)}
+        return partition, build_cbfe_pool(benzamides, NetworkOptions())
+
+    def test_one_bridge_per_joined_group_pair_by_default(self, benzamides):
+        partition, pool = self._two_groups(benzamides)
+        assert len(select_bridges(partition, benzamides, pool)) == 1
+
+    def test_n_per_pair_takes_that_many_crossings(self, benzamides):
+        partition, pool = self._two_groups(benzamides)
+        bridges = select_bridges(partition, benzamides, pool, n_per_pair=3)
+        assert len(bridges) == 3
+        assert len(set(bridges)) == 3
+        assert all(partition[a] != partition[b] for a, b in bridges)
+
+    def test_the_extra_crossings_extend_the_ranked_prefix(self, benzamides):
+        """The second bridge is the second-best one, not an arbitrary spare."""
+        partition, pool = self._two_groups(benzamides)
+        assert (
+            select_bridges(partition, benzamides, pool)[0]
+            == select_bridges(partition, benzamides, pool, n_per_pair=2)[0]
+        )
+
+    def test_three_groups_are_joined_by_a_spanning_selection(self, benzamides):
+        names = sorted(benzamides)
+        partition = {name: index % 3 for index, name in enumerate(names)}
+        pool = build_cbfe_pool(benzamides, NetworkOptions())
+        bridges = select_bridges(partition, benzamides, pool, n_per_pair=2)
+        assert len(bridges) == 4, "two group pairs joined, two crossings each"
+        graph: nx.Graph = nx.Graph()
+        graph.add_nodes_from(benzamides)
+        graph.add_edges_from(bridges)
+        assert nx.number_connected_components(graph) == len(benzamides) - len(bridges)
+
+    def test_a_single_group_needs_no_bridges(self, benzamides):
+        partition = dict.fromkeys(benzamides, 0)
+        assert select_bridges(partition, benzamides, build_cbfe_pool(benzamides, NetworkOptions())) == []
+
+    def test_ranking_without_a_graph_falls_back_to_similarity(self, benzamides):
+        """Centrality has no answer without a graph, so it must simply drop out."""
+        partition, pool = self._two_groups(benzamides)
+        assert select_bridges(partition, benzamides, pool, graph=None) != []
+
+    def test_is_deterministic(self, benzamides):
+        partition, pool = self._two_groups(benzamides)
+        runs = {tuple(select_bridges(partition, benzamides, pool, n_per_pair=2)) for _ in range(3)}
+        assert len(runs) == 1
 
 
 class TestOptionValidation:

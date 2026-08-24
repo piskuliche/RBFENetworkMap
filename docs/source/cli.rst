@@ -53,6 +53,21 @@ counterpoised edge is set by ``--cbfe-base-cost`` and ``--cbfe-atom-weight``. Se
 :doc:`concepts/network_selection` for what each mode may and may not spend an edge on.
 ``--cbfe all`` skips mapping altogether, so ``--mapper`` is ignored there.
 
+For a set large enough that ``n ln n`` edges is more than anyone will run, plan it as
+clusters instead:
+
+.. code-block:: bash
+
+   rbfenet plan --ligands ligands.sdf \
+                --cluster-by scaffold --cluster-bridges 2 \
+                --out network.json
+
+``--cluster-by`` accepts ``none`` (default), ``charge``, ``scaffold``, and ``fingerprint``.
+Each cluster is planned as its own subnetwork and joined to the others by
+``--cluster-bridges`` edges per joined cluster pair; the default of two puts each crossing
+on a cycle. See :doc:`concepts/network_selection` for why the saving is real and what
+happens when a partition would disconnect the network.
+
 ``--pair-evaluation adaptive`` fingerprint-ranks the all-pairs pool and maps it in
 batches. It first evaluates each ligand's nearest neighbours, then prioritizes pairs
 that bridge currently disconnected feasible components. Once connected, it evaluates

@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
+from rbfenetmap.core.clustering import CLUSTER_METHODS
 from rbfenetmap.core.models import EDGE_SEPARATOR, parse_edge_key
 
 __all__ = (
@@ -17,6 +18,7 @@ __all__ = (
     "AlignmentMethod",
     "AlignmentOptions",
     "CBFEMode",
+    "ClusterMethod",
     "CompatLevel",
     "ChargeChangePolicy",
     "CorePruningPolicy",
@@ -43,6 +45,7 @@ PairEvaluation = Literal["eager", "adaptive"]
 CycleCoverageMode = Literal["node", "edge"]
 HubSelection = Literal["most_partners", "min_total_cost"]
 CBFEMode = Literal["off", "bridge", "cycles", "all"]
+ClusterMethod = Literal["none", "charge", "scaffold", "fingerprint"]
 CompatLevel = Literal["v0.4"]
 
 #: Released behaviours a run can be pinned to. Versioned rather than a single ``legacy``
@@ -403,6 +406,34 @@ class NetworkOptions:
         Added to ``cbfe_base_cost`` for each heavy atom summed over both ligands. A
         counterpoised calculation decouples both molecules in full, so its expense scales
         with how much there is to decouple.
+    cluster_by : {"none", "charge", "scaffold", "fingerprint"}
+        Partition the ligands and plan each cluster as its own subnetwork, joined to the
+        others by a few deliberately chosen edges. ``"none"`` (default) is the unpartitioned
+        behaviour.
+
+        This is an **edge-budget** knob, not a feasibility one. The precision floor of an
+        RBFE network goes as ``n ln n``, and that is superlinear, so ``sum_i n_i ln n_i`` is
+        strictly smaller than ``n ln n`` for any real partition: planning five balanced
+        clusters of twenty to the floor costs roughly 190 edges where one hundred ligands
+        cost 460. Nothing here changes which edges are *feasible* -- cross-cluster mappings
+        are as available as they ever were, they are simply not worth buying in quantity.
+
+        - ``"charge"`` -- net formal charge classes. Exact, thresholdless, and it isolates
+          the transformation the scorer already penalises hardest.
+        - ``"scaffold"`` -- the Bemis-Murcko framework, which is what "series" usually means.
+        - ``"fingerprint"`` -- average-linkage hierarchical clustering on Tanimoto distance,
+          for a set with neither a clean charge split nor a shared framework.
+    cluster_bridges : int
+        Edges spent joining each pair of clusters that gets joined, when ``cluster_by`` is
+        set. Ignored otherwise.
+
+        The default of ``2`` is deliberate and is the reason this is not simply ``1``. Two
+        edges between the same two clusters put the crossing itself **on a cycle**, since
+        the paths inside each cluster close the loop. Cross-cluster edges are the least
+        similar and therefore the least trustworthy edges in the network, so applying the
+        every-edge-in-a-cycle invariant precisely there buys more per edge than anywhere
+        else. Setting ``1`` gives the minimal spanning join and leaves each crossing
+        unchecked.
     softcore : SoftcorePolicy
         Feasibility policy handed to the repair.
     compat : str, optional
@@ -446,6 +477,8 @@ class NetworkOptions:
     cbfe_mode: CBFEMode = "off"
     cbfe_base_cost: float = 8.0
     cbfe_atom_weight: float = 0.05
+    cluster_by: ClusterMethod = "none"
+    cluster_bridges: int = 2
     softcore: SoftcorePolicy = field(default_factory=SoftcorePolicy)
     compat: str | None = None
 
@@ -491,6 +524,13 @@ class NetworkOptions:
             raise ValueError("cbfe_base_cost must not be negative.")
         if self.cbfe_atom_weight < 0:
             raise ValueError("cbfe_atom_weight must not be negative.")
+        if self.cluster_by not in CLUSTER_METHODS:
+            raise ValueError(f"cluster_by must be one of {list(CLUSTER_METHODS)}; got {self.cluster_by!r}.")
+        if self.cluster_bridges < 1:
+            raise ValueError(
+                "cluster_bridges must be at least 1: joining two clusters takes an edge. Use "
+                "cluster_by='none' to plan the ligands as a single set."
+            )
         if self.compat is not None and self.compat not in COMPAT_LEVELS:
             raise ValueError(f"Unknown compat level {self.compat!r}. Known: {list(COMPAT_LEVELS)}.")
         if self.pair_strategy == "star" and not self.hub:
@@ -567,6 +607,8 @@ class NetworkOptions:
             "cbfe_mode": "off",
             "cbfe_base_cost": 8.0,
             "cbfe_atom_weight": 0.05,
+            "cluster_by": "none",
+            "cluster_bridges": 2,
             "softcore": SoftcorePolicy(
                 ring_policy="ring_system",
                 max_softcore_atoms=12,

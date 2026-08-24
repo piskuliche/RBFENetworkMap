@@ -226,6 +226,94 @@ network is two ``BuildEdges`` runs, and the layout mirrors that. Each carries an
 amberstudio builds its masks from the residue roles, since there is no mapping to convey --
 so ``cbfe/`` holds only the edge list. An all-RBFE network keeps the historical flat layout.
 
+Clustered planning
+------------------
+
+``cluster_by`` partitions the ligands and plans each cluster as its own subnetwork, joined
+to the others by a few deliberately chosen edges. It is a knob on the default planner, not a
+planner of its own, because a user who partitions their ligands still wants cycle coverage,
+degree targets and CBFE bridging -- and a separate planner would have to reimplement all
+three to offer any of them.
+
+Why a partition is cheaper
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The precision floor of an RBFE network goes as ``k_min ~ n ln n`` (Pitman *et al.*, *JCIM*
+2023, 63, 1776-1793); below it, precision degrades *worse* as the set grows. That floor is
+superlinear, and superlinear costs are exactly the ones a partition beats::
+
+   sum_i n_i ln n_i  <  n ln n
+
+with equality only for a single cluster. One hundred ligands in five balanced clusters need
+roughly 190 edges rather than 460, a 59% saving at maintained per-cluster precision. Even a
+badly imbalanced split saves 30-50%, because the dominant term is the largest cluster and it
+is still smaller than the whole set.
+
+The clusterers
+~~~~~~~~~~~~~~
+
+``none`` (default)
+   One cluster. Exactly the behaviour described above.
+
+``charge``
+   Net formal charge classes. The one clusterer with no threshold in it -- charge is a
+   property of the molecule rather than of a similarity measure -- and it isolates the
+   transformation the scorer already penalises hardest.
+
+``scaffold``
+   The Bemis-Murcko framework, which is close to what a medicinal chemist means by "series".
+   Acyclic ligands share the empty scaffold rather than each becoming a singleton.
+
+``fingerprint``
+   Average-linkage hierarchical clustering on ``1 - Tanimoto``, cut at a distance of 0.6 --
+   one minus the package's own ``prefilter_min_tanimoto``, so there is a single notion of
+   "similar enough" to reason about. scipy's :func:`~scipy.cluster.hierarchy.linkage` and
+   :func:`~scipy.cluster.hierarchy.fcluster` do the work; scipy is already a dependency and
+   the density methods used elsewhere in the field (HDBSCAN, DBSCAN) would return a noise
+   label this package has no use for, since every ligand must land in a cluster to be
+   planned at all.
+
+Clustering is a **selection-level objective, not a feasibility one.** Nothing here consults
+the soft-core budget, a mapping, or a rejection. A cross-cluster edge is as feasible as it
+ever was; the point is that buying many of them is a worse use of the budget than buying
+edges inside a cluster, because the within-cluster edges are the ones a cycle can check.
+
+Why two bridges
+~~~~~~~~~~~~~~~
+
+``cluster_bridges`` defaults to **2**, and the second one is the whole point. Two edges
+between the same two clusters put the crossing itself on a cycle, since the paths inside
+each cluster close the loop. Cross-cluster edges are the least similar and therefore the
+least trustworthy edges in the network, so applying the every-edge-in-a-cycle invariant
+precisely there buys more per edge than anywhere else. ``cluster_bridges=1`` gives the
+minimal spanning join and leaves each crossing unchecked by anything.
+
+The crossings are chosen by the same maximum-merit sweep the CBFE bridges use --
+:func:`~rbfenetmap.core.cbfe.select_bridges`, with the clusterer's partition passed in
+where the connected components would otherwise go. Connected components are only one
+interesting partition of a ligand set, and joining the groups of any other is the same
+problem with the same ranking.
+
+Where it acts
+~~~~~~~~~~~~~
+
+At one point, before anything is selected: the cross-cluster edges are pruned from the
+candidate graph down to the chosen crossings, and every stage downstream then runs unchanged
+and simply cannot spend on a crossing. The kept crossings are added to the selection
+outright rather than left to the spanning pass, because Kruskal would take one of the two
+and discard the other as redundant -- and "redundant" is exactly what makes the second one
+worth having.
+
+Pruning is an optimisation, and an optimisation that changes the answer would be a bug. If
+a cluster's members reach each other only *through* another cluster, removing the crossings
+would disconnect a network that was connected, so the cheapest necessary crossings are
+restored and the restoration is reported on ``unmet_constraints`` -- the user asked for a
+partition and did not entirely get one, which is a fact about their ligand set worth seeing.
+
+Clustering composes with CBFE rather than competing with it: inter-cluster edges are exactly
+where a counterpoised edge belongs, and a cluster the RBFE pool never connected internally
+is still bridged by ``cbfe_mode``.
+
 Reproducing a released behaviour
 --------------------------------
 
@@ -328,6 +416,11 @@ Knob precedence
      - ``cbfe_mode``
      - Widens the pool rather than steering selection. Applied *before* cost competition,
        so it can rescue (3) without ever displacing a feasible RBFE edge.
+   * - 9
+     - ``cluster_by``, ``cluster_bridges``
+     - Narrows the pool, before everything above except (1) and (2): cross-cluster
+       candidates are pruned to ``cluster_bridges`` per joined cluster pair. Never at the
+       expense of (3) -- a crossing needed to span the ligands is restored and reported.
 
 ``--compat`` is not in this table. It is a *constructor*: it writes the values the rest of
 the table then operates on, so it is applied before precedence rather than competing inside

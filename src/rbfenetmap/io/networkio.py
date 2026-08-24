@@ -182,6 +182,8 @@ def network_to_dict(network: Network) -> dict[str, Any]:
                 "cbfe_mode": options.cbfe_mode,
                 "cbfe_base_cost": options.cbfe_base_cost,
                 "cbfe_atom_weight": options.cbfe_atom_weight,
+                "cluster_by": options.cluster_by,
+                "cluster_bridges": options.cluster_bridges,
                 "softcore": {
                     "ring_policy": options.softcore.ring_policy,
                     "max_softcore_atoms": options.softcore.max_softcore_atoms,
@@ -255,6 +257,8 @@ def load_network(path: Path) -> Network:
             cbfe_mode=options_data.get("cbfe_mode", "off"),
             cbfe_base_cost=options_data.get("cbfe_base_cost", 8.0),
             cbfe_atom_weight=options_data.get("cbfe_atom_weight", 0.05),
+            cluster_by=options_data.get("cluster_by", "none"),
+            cluster_bridges=options_data.get("cluster_bridges", 2),
             compat=options_data.get("compat"),
             softcore=SoftcorePolicy(**softcore_data) if softcore_data else SoftcorePolicy(),
         )

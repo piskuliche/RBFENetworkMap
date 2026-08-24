@@ -104,6 +104,13 @@ COMPAT_CLI_PINS: dict[str, dict[str, Any]] = {
         "cbfe": "off",
         "cbfe_base_cost": 8.0,
         "cbfe_atom_weight": 0.05,
+        # Clustered planning did not exist in v0.4, so what reproduces it is the setting
+        # that makes the whole feature a no-op -- not the current default of any knob
+        # inside it. `cluster_bridges` is pinned alongside it even though `cluster_by`
+        # already neutralises it, because a pin that depends on another pin to be
+        # harmless stops being one the moment the other moves.
+        "cluster_by": "none",
+        "cluster_bridges": 2,
         "consistency": "pairwise",
     }
 }
@@ -564,6 +571,31 @@ def add_network_arguments(parser: argparse.ArgumentParser) -> None:
         help="Added to the CBFE base cost per heavy atom, summed over both ligands (default: %(default)s).",
     )
     group.add_argument(
+        "--cluster-by",
+        choices=("none", "charge", "scaffold", "fingerprint"),
+        default="none",
+        help=(
+            "Partition the ligands and plan each cluster as its own subnetwork, joined by a few "
+            "chosen edges (default: %(default)s). The precision floor of a network goes as n ln n, "
+            "which is superlinear, so planning d clusters to the floor costs strictly less than "
+            "planning the whole set to it -- roughly 190 edges rather than 460 for 100 ligands in "
+            "five clusters. 'charge' groups on net formal charge, 'scaffold' on the Bemis-Murcko "
+            "framework, 'fingerprint' by average-linkage clustering on Tanimoto distance."
+        ),
+    )
+    group.add_argument(
+        "--cluster-bridges",
+        type=int,
+        default=2,
+        metavar="N",
+        help=(
+            "Edges spent joining each pair of clusters, when --cluster-by is set (default: "
+            "%(default)s). Two puts the crossing itself on a cycle, which applies the "
+            "every-edge-in-a-cycle invariant to the least similar and least trustworthy edges in "
+            "the network; one gives the minimal join and leaves each crossing unchecked."
+        ),
+    )
+    group.add_argument(
         "--progress",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -650,6 +682,8 @@ def build_network_options(args: argparse.Namespace) -> NetworkOptions:
         cbfe_mode=args.cbfe,
         cbfe_base_cost=args.cbfe_base_cost,
         cbfe_atom_weight=args.cbfe_atom_weight,
+        cluster_by=args.cluster_by,
+        cluster_bridges=args.cluster_bridges,
         softcore=softcore,
         compat=getattr(args, "compat", None),
     )

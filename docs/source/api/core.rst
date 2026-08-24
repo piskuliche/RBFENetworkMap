@@ -46,6 +46,7 @@ Diagnostics and cost
 .. automodule:: rbfenetmap.core.diagnostics
 
 .. automodule:: rbfenetmap.core.cost
+.. automodule:: rbfenetmap.core.clustering
 
 Plugin registry
 ---------------

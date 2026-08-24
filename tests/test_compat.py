@@ -157,6 +157,8 @@ class TestCLIConflicts:
             ("--max-diameter", "5"),
             ("--n-redundancy", "3"),
             ("--hub-selection", "min_total_cost"),
+            ("--cluster-by", "charge"),
+            ("--cluster-bridges", "3"),
         ],
     )
     def test_pinned_knob_is_refused(self, tmp_path, capsys, flag, value):

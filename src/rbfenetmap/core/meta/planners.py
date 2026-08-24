@@ -37,6 +37,38 @@ class AbstractNetworkPlanner(ABC):
     #: pipeline hands it a pool that is already entirely CBFE.
     supports_cbfe: ClassVar[bool] = False
 
+    #: Whether this planner optimises a statistical design criterion. ``design`` names an
+    #: *objective*, not a filter, so there is nothing a planner can do with it halfway: a
+    #: planner that does not optimise the criterion would ignore the flag entirely, and a
+    #: knob that is silently ignored is worse than one that is absent.
+    supports_design: ClassVar[bool] = False
+
+    def check_design_support(self, options: NetworkOptions) -> None:
+        """Raise if *options* names a design criterion this planner cannot optimise.
+
+        Parameters
+        ----------
+        options : NetworkOptions
+
+        Raises
+        ------
+        rbfenetmap.core.exceptions.NetworkPlanError
+
+        Notes
+        -----
+        The counterpart to :meth:`check_cbfe_support`, and refused for the same reason.
+        ``--design a_optimal`` under the ``mst`` planner would produce a perfectly ordinary
+        minimum-spanning-tree network, with nothing anywhere to connect the result to the
+        flag the user set -- the ``--consistency graph`` failure mode this package already
+        has one instance of and does not want a second.
+        """
+        if self.supports_design or options.design == "none":
+            return
+        raise NetworkPlanError(
+            f"Planner {self.name!r} does not optimise a design criterion, but design={options.design!r} "
+            "asks for one. Use the 'optimal' planner, or drop --design."
+        )
+
     def check_cbfe_support(self, options: NetworkOptions) -> None:
         """Raise if *options* asks for CBFE placement this planner cannot do.
 

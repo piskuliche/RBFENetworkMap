@@ -467,6 +467,7 @@ def build_network(
     # Before the mapping stage, so a planner that cannot honour the requested CBFE mode
     # fails in the first second of a run rather than after several minutes of MCS work.
     planner_obj.check_cbfe_support(network_options)
+    planner_obj.check_design_support(network_options)
 
     if network_options.cbfe_mode == "all":
         # No mapper is resolved at all: a counterpoised edge has no common core to find, so

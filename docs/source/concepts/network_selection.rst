@@ -313,6 +313,173 @@ partition and did not entirely get one, which is a fact about their ligand set w
 Clustering composes with CBFE rather than competing with it: inter-cluster edges are exactly
 where a counterpoised edge belongs, and a cluster the RBFE pool never connected internally
 is still bridged by ``cbfe_mode``.
+Statistical optimal design
+--------------------------
+
+Everything above selects on **cost**: cheapest spanning tree, then cheap redundancy. That
+answers "what is the cheapest network that connects everything and closes enough cycles?".
+A different question is worth asking -- "which network, at this budget, gives the most
+*precise* free energies?" -- and it has a classical answer.
+
+The fact that makes it tractable: **the Fisher information matrix of a network of relative
+measurements is the weighted graph Laplacian.**
+
+.. math::
+
+   F_{ii} = \sum_{k \ne i} \sigma_{ik}^{-2}, \qquad
+   F_{ij} = -\sigma_{ij}^{-2}, \qquad
+   C = F^{+}
+
+DiffNet, HiMap, Yang's MLE and cinnabar's network analysis are the same object, so one
+implementation (:mod:`rbfenetmap.core.design`) serves selection, sample allocation, and
+analysis.
+
+Two criteria, and when to use which
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``--design a_optimal``
+   Minimise :math:`\operatorname{tr} C`, the summed variance of the estimated free
+   energies. Use this when each ligand's own number is what matters.
+
+``--design d_optimal``
+   Minimise :math:`\ln \det C`, the volume of their joint confidence ellipsoid.
+
+The choice is not arbitrary. The pseudo-determinant of a Laplacian is :math:`n` times its
+weighted spanning-tree count (Kirchhoff), so minimising :math:`\ln \det C` *maximises the
+spanning-tree count* -- and a network with more spanning trees is a network with more
+cycles. Pitman measures 40--80% more cycles at equal edge count, which is why the
+recommendation is: **D-optimal when a cycle-closure correction will be applied downstream,
+A-optimal otherwise.**
+
+Both need a planner that optimises them::
+
+   rbfenet plan --ligands ligands.sdf --scorer variance --planner optimal --design d_optimal
+
+``--design`` under any other planner is **refused, not ignored**. A criterion is an
+objective, and there is nothing a planner can do with one halfway; a flag that silently did
+nothing is the ``--consistency graph`` failure mode this package already has one instance
+of and does not want a second. For the same reason, ``--planner optimal`` without
+``--design`` is refused rather than defaulting to a criterion: the two answer different
+questions and neither is a safe guess.
+
+The cost scale has to mean something
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:math:`F` is built from :math:`1/\sigma^2`, so the scorer's totals have to *be* standard
+deviations rather than a ranking. That is what the ``variance`` scorer supplies -- NetBFE's
+equation 19, a predicted per-edge standard deviation in kcal/mol::
+
+   s_ij = 1.0 + 1.0 * sqrt(max(h_ij, h_ji)) + 0.5 * sqrt(max(H_ij, H_ji))
+
+with *h* the transforming (soft-core) heavy-atom count and *H* the total. The square roots
+are the point: sampling error grows with the square root of the decoupled degrees of
+freedom, so doubling the soft-core does not double the noise. The intercept is the
+irreducible part, and it also keeps :math:`1/\sigma^2` finite.
+
+The design planner runs under any scorer. Under any *other* scorer the numbers it minimises
+are internally consistent but are not variances, and none of the published payoffs apply.
+
+Why the singular matrix is not a problem
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:math:`F` is always singular for an RBFE-only network -- no relative measurement pins the
+absolute offset, so the all-ones vector is in the null space. Restraining the mean
+NetBFE-style, :math:`F^*(\omega) = F + \omega m^{-2} \mathbb{1}\mathbb{1}^T`, and taking
+:math:`\omega \to \infty` through the bordered system converges on the Moore-Penrose
+pseudo-inverse. **The optimal design does not depend on** :math:`\omega`, which is what
+makes the problem well posed: the regulariser fixes the unidentifiable offset and never
+trades against the criterion.
+
+How the edges are chosen
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Choosing the best *k*-subset of :math:`\binom{n}{2}` edges is combinatorial. The planner
+ships Xu's Appendix-H heuristic:
+
+1. the cheapest spanning tree, so connectivity is established before anything competes for
+   the budget;
+2. a candidate pool capped at ``design_candidate_factor * n`` edges (default 3n) -- the tree
+   plus the cheapest remaining candidates;
+3. greedy descent on the criterion within that pool, up to the edge budget.
+
+Published at **1.10 ± 0.03x** of the true optimum. Measured here against exhaustive
+enumeration on small complete graphs, the worst ratio over 40 randomised instances is 1.03x
+(A-optimal) and 1.08x (D-optimal).
+
+``--design-refine`` adds a **Fedorov exchange** pass: repeatedly swap the in-design edge
+whose removal costs least for the candidate whose addition helps most, until no swap
+improves the criterion. It brings the same worst case to 1.005x, at far more criterion
+evaluations. Off by default. It is implemented in numpy rather than through HiMap's route,
+which pins ``rpy2==3.4.5`` and ``scikit-learn==0.23.2`` and requires an R installation.
+
+One deviation from Appendix H is worth knowing about. Its first stage is the cheapest
+**2-edge-connected** spanning subgraph, not a spanning tree. Forcing that costs more than it
+buys: a bridge cover chosen by *cost* spends budget the criterion would rather spend
+elsewhere, and on the same instances it pushes the D-optimal result to 1.33x where letting
+the criterion spend that budget itself stays at 1.08x. The criterion closes the bridges
+worth closing on its own; any that survive are reported on ``unmet_constraints`` rather than
+bought out.
+
+The edge budget
+~~~~~~~~~~~~~~~
+
+With ``n_edges`` unset, the design planner uses Pitman's floor,
+:math:`k_{\min} = \operatorname{round}(n \ln n)`, instead of "as many as redundancy
+wants". Below that bound precision degrades **worse as n grows**, so a design planner that
+ignored it would be optimising inside a budget already known to be too small. At *n* = 40
+that is 148 edges, against the ~40 that ``edges_per_ligand=2`` buys.
+
+This is a property of this planner, not a change to the package default. ``mst`` is
+untouched and ``--compat v0.4`` is unaffected.
+
+``edges_per_ligand`` and ``min_cycle_coverage`` are **not** enforced here. Spending budget
+to hit a degree target would work directly against the objective the user asked for, so a
+shortfall is recorded on ``unmet_constraints`` and left alone.
+
+Per-edge sample allocation
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The same matrix answers a second question: given a fixed simulation budget, how should it be
+split across the selected edges? Model the variance as falling with :math:`1/t`, so an edge
+given :math:`t_e` nanoseconds contributes weight :math:`t_e / \sigma_e^2`. Minimising
+:math:`\operatorname{tr} C` subject to :math:`\sum t_e = T` is convex, and at the optimum
+
+   every edge returns the same variance reduction per nanosecond.
+
+Any other split has an edge worth moving time to. Set ``--design-total-ns`` and the Amber
+exporter writes the result into each per-edge ``.runconfig``, alongside the atom map it
+already carries:
+
+.. code-block:: yaml
+
+   sample_allocation:
+     lambda_windows: 19
+     simulation_ns: 12.4
+     predicted_sigma_kcal: 2.31
+
+The window count is the edge's share mapped onto ``--design-lambda-min`` /
+``--design-lambda-max``. An edge allocated near-zero time is not a bug -- it is the
+allocation reporting that an edge the planner selected turned out redundant given how the
+rest was funded.
+
+This is the **static** first pass. Published payoff is roughly a twofold variance reduction
+at equal cost; the iterative refit that converges in five rounds needs measured variances
+and therefore a round trip through the MD engine, which is out of scope here.
+
+.. warning::
+
+   **Optimal design buys precision. It does not promise accuracy.**
+
+   Over five TYK2 iterations NetBFE's :math:`\operatorname{tr} C` fell monotonically from
+   1.08 to 0.78 while the RMSE against experiment *rose* from 0.84 to 0.91. The criterion
+   measures how reproducible the numbers are, not how right they are -- it knows nothing
+   about the force field, the poses, or the protonation states. A network that halves its
+   predicted variance can be no closer to experiment than the one before it, and this is
+   the observed case, not a hypothetical one.
+
+   Read a falling :math:`\operatorname{tr} C` as "the statistics are no longer the
+   bottleneck", and take that as a cue to look at the model rather than as evidence the
+   answers improved.
 
 Reproducing a released behaviour
 --------------------------------
@@ -421,6 +588,16 @@ Knob precedence
      - Narrows the pool, before everything above except (1) and (2): cross-cluster
        candidates are pruned to ``cluster_bridges`` per joined cluster pair. Never at the
        expense of (3) -- a crossing needed to span the ligands is restored and reported.
+     - ``design``
+     - Replaces the *objective* of (5) rather than competing with it, and only under the
+       ``optimal`` planner. (1) to (4) still bind: banned edges stay out, forced edges stay
+       in, the network still spans, and ``n_edges`` still caps. What changes is what fills
+       the remaining budget -- the criterion instead of cost and degree targets -- so
+       ``edges_per_ligand`` and ``min_cycle_coverage`` drop to reporting only.
+   * - 10
+     - ``design_total_ns``
+     - Not a selection knob at all. Applied after planning, at export, over whatever edges
+       were chosen; it changes how the network is run, never which network it is.
 
 ``--compat`` is not in this table. It is a *constructor*: it writes the values the rest of
 the table then operates on, so it is applied before precedence rather than competing inside

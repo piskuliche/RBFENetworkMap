@@ -224,6 +224,44 @@ class TestNetworkSerialization:
         assert reloaded.options.cbfe_base_cost == pytest.approx(6.5)
         assert reloaded.options.cbfe_atom_weight == pytest.approx(0.02)
 
+    def test_round_trip_preserves_design_options(self, planned, tmp_path):
+        """Every design knob, so a planned network still states how it was designed."""
+        from dataclasses import replace
+
+        planned = replace(
+            planned,
+            options=NetworkOptions(
+                design="d_optimal",
+                design_candidate_factor=4.5,
+                design_refine=True,
+                design_total_ns=250.0,
+                design_lambda_min=8,
+                design_lambda_max=32,
+            ),
+        )
+        reloaded = load_network(dump_network(planned, tmp_path / "design.json"))
+
+        assert reloaded.options is not None
+        assert reloaded.options.design == "d_optimal"
+        assert reloaded.options.design_candidate_factor == pytest.approx(4.5)
+        assert reloaded.options.design_refine is True
+        assert reloaded.options.design_total_ns == pytest.approx(250.0)
+        assert (reloaded.options.design_lambda_min, reloaded.options.design_lambda_max) == (8, 32)
+
+    def test_a_file_without_design_keys_loads_as_undesigned(self, planned, tmp_path):
+        """Networks written before this existed must still read back, unpinned."""
+        import json
+
+        path = dump_network(planned, tmp_path / "old.json")
+        payload = json.loads(path.read_text())
+        for key in list(payload["options"]):
+            if key.startswith("design"):
+                del payload["options"][key]
+        path.write_text(json.dumps(payload))
+
+        assert load_network(path).options.design == "none"
+        assert load_network(path).options.design_total_ns is None
+
     def test_edge_kind_survives_the_round_trip(self, planned, tmp_path):
         from dataclasses import replace
 
@@ -352,6 +390,42 @@ class TestExporters:
         runconfigs = sorted((tmp_path / "rbfe").glob("atommap_*.runconfig"))
         assert len(runconfigs) == len(mixed_network.rbfe_edges)
 
+    def test_amber_writes_no_allocation_unless_a_budget_is_set(self, planned, tmp_path):
+        """A uniform split is a real decision about machine time, not a safe default."""
+        pytest.importorskip("yaml")
+        import yaml
+
+        from rbfenetmap.plugins.exporters import create_exporter
+
+        written = create_exporter("amber").export(planned, tmp_path)
+        runconfig = next(p for p in written if p.name.startswith("atommap_") and "~" in p.name)
+        assert "sample_allocation" not in yaml.safe_load(runconfig.read_text())
+
+    def test_amber_writes_the_sample_allocation_when_a_budget_is_set(self, planned, tmp_path):
+        """3.3: the static A-optimal split, landing in the file that is already per-edge."""
+        pytest.importorskip("yaml")
+        import dataclasses
+
+        import yaml
+
+        from rbfenetmap.plugins.exporters import create_exporter
+
+        budgeted = dataclasses.replace(
+            planned,
+            options=dataclasses.replace(
+                planned.options, design_total_ns=100.0, design_lambda_min=12, design_lambda_max=24
+            ),
+        )
+        written = create_exporter("amber").export(budgeted, tmp_path)
+        runconfigs = [p for p in written if p.name.startswith("atommap_") and "~" in p.name]
+        blocks = [yaml.safe_load(p.read_text())["sample_allocation"] for p in runconfigs]
+
+        assert sum(b["simulation_ns"] for b in blocks) == pytest.approx(100.0, rel=1e-3)
+        assert all(12 <= b["lambda_windows"] <= 24 for b in blocks)
+        assert all(b["predicted_sigma_kcal"] > 0 for b in blocks)
+        # The whole point: the split is not uniform, or there was nothing to allocate.
+        assert len({b["simulation_ns"] for b in blocks}) > 1
+
     def test_amber_keeps_the_flat_layout_for_an_all_rbfe_network(self, planned, tmp_path):
         pytest.importorskip("yaml")
 
@@ -469,6 +543,60 @@ class TestCLI:
             pytest.skip("kartograf is installed")
         assert main(["plugins", "--kind", "mapper"]) == 0
         assert "kartograf" not in capsys.readouterr().out
+
+    @pytest.mark.integration
+    def test_plan_with_a_design_criterion_end_to_end(self, planned, tmp_path):
+        """--planner optimal --scorer variance --design, all the way to the JSON."""
+        from rdkit import Chem
+
+        sdf = tmp_path / "ligands.sdf"
+        with Chem.SDWriter(str(sdf)) as writer:
+            for ligand in planned.ligands.values():
+                mol = Chem.Mol(ligand.mol)
+                mol.SetProp("_Name", ligand.name)
+                writer.write(mol)
+
+        out = tmp_path / "design.json"
+        code = main(
+            [
+                "plan",
+                "--ligands",
+                str(sdf),
+                "--out",
+                str(out),
+                "--planner",
+                "optimal",
+                "--scorer",
+                "variance",
+                "--design",
+                "d_optimal",
+                "--n-edges",
+                "7",
+                "--design-total-ns",
+                "140",
+            ]
+        )
+        assert code == 0
+        network = load_network(out)
+        assert network.planner == "optimal"
+        assert network.options.design == "d_optimal"
+        assert len(network.edges) == 7
+        assert all(edge.score.total > 0 for edge in network.edges)
+
+    @pytest.mark.integration
+    def test_a_design_criterion_under_the_mst_planner_is_refused(self, planned, tmp_path, capsys):
+        """A knob that did nothing under the default planner would be the worst outcome."""
+        from rdkit import Chem
+
+        sdf = tmp_path / "ligands.sdf"
+        with Chem.SDWriter(str(sdf)) as writer:
+            for ligand in planned.ligands.values():
+                mol = Chem.Mol(ligand.mol)
+                mol.SetProp("_Name", ligand.name)
+                writer.write(mol)
+
+        assert main(["plan", "--ligands", str(sdf), "--out", str(tmp_path / "n.json"), "--design", "a_optimal"]) == 1
+        assert "does not optimise a design criterion" in capsys.readouterr().err
 
     @pytest.mark.integration
     def test_plan_writes_a_network(self, planned, tmp_path, capsys):

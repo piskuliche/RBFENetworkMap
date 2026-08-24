@@ -55,6 +55,9 @@ counterpoised edge is set by ``--cbfe-base-cost`` and ``--cbfe-atom-weight``. Se
 
 For a set large enough that ``n ln n`` edges is more than anyone will run, plan it as
 clusters instead:
+To select edges by a statistical criterion rather than by cost, use the ``optimal`` planner
+with the ``variance`` scorer -- the one scorer whose totals are predicted standard
+deviations in kcal/mol, which is the scale the criterion is built on:
 
 .. code-block:: bash
 
@@ -67,6 +70,24 @@ Each cluster is planned as its own subnetwork and joined to the others by
 ``--cluster-bridges`` edges per joined cluster pair; the default of two puts each crossing
 on a cycle. See :doc:`concepts/network_selection` for why the saving is real and what
 happens when a partition would disconnect the network.
+                --scorer variance --planner optimal --design d_optimal \
+                --design-total-ns 500 \
+                --out network.json --export amber --export-dir ./out
+
+``--design`` accepts ``none`` (default), ``a_optimal``, and ``d_optimal``. Prefer
+``d_optimal`` when a cycle-closure correction will be applied downstream -- it yields a
+markedly more cyclic network at the same edge count -- and ``a_optimal`` otherwise. Naming
+it alongside any planner but ``optimal`` is refused rather than ignored, and ``--planner
+optimal`` without it is refused too: the two criteria answer different questions and
+neither is a safe default. With ``--n-edges`` unset the design planner uses Pitman's floor,
+``round(n ln n)``.
+
+``--design-total-ns`` additionally splits a simulation budget A-optimally across the
+selected edges and writes it into each Amber ``.runconfig`` as a lambda-window and
+nanosecond allocation, bounded by ``--design-lambda-min`` / ``--design-lambda-max``.
+``--design-refine`` adds a Fedorov exchange pass. See
+:doc:`concepts/network_selection` -- including the warning that optimal design buys
+precision and does not promise accuracy.
 
 ``--pair-evaluation adaptive`` fingerprint-ranks the all-pairs pool and maps it in
 batches. It first evaluates each ligand's nearest neighbours, then prioritizes pairs

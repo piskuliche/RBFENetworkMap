@@ -14,10 +14,12 @@ from rbfenetmap.core.models import EDGE_SEPARATOR, parse_edge_key
 
 __all__ = (
     "COMPAT_LEVELS",
+    "CONSISTENCY_SCOPES",
     "AlignmentMethod",
     "AlignmentOptions",
     "CBFEMode",
     "CompatLevel",
+    "ConsistencyScope",
     "ChargeChangePolicy",
     "CorePruningPolicy",
     "EdgeDirection",
@@ -39,6 +41,12 @@ EdgeDirection = Literal["fewer_softcore_first", "lexicographic", "heavier_second
 SelectionObjective = Literal["uniform_redundancy", "connectivity_then_cycles"]
 PairEvaluation = Literal["eager", "adaptive"]
 CBFEMode = Literal["off", "bridge", "cycles", "all"]
+ConsistencyScope = Literal["pairwise", "component", "graph"]
+
+#: How widely one core -- and therefore one soft-core -- is required per ligand, ordered
+#: from loosest to strictest. A scope's position is what callers test against, rather than
+#: a chain of equality checks that would drift as scopes are added.
+CONSISTENCY_SCOPES: tuple[ConsistencyScope, ...] = ("pairwise", "component", "graph")
 CompatLevel = Literal["v0.4"]
 
 #: Released behaviours a run can be pinned to. Versioned rather than a single ``legacy``
@@ -336,21 +344,36 @@ class NetworkOptions:
         the CLI enables it automatically on interactive terminals.
     jobs : int
         Worker processes used for mapping and scoring.
-    consistency : {"pairwise", "graph"}
-        Whether each edge gets its own common core, or every ligand keeps one core across
-        all of its edges.
+    consistency : {"pairwise", "component", "graph"}
+        How widely a ligand is required to hold **one** common core -- and therefore, since
+        the core and the soft-core are a strict partition of the ligand's atoms, **one
+        soft-core**. That corollary is the point of the knob: the Amber ``scmask`` is the
+        soft-core, so a ligand with one core across its edges has one ``scmask`` across
+        them too.
 
-        - ``"pairwise"`` (default) -- each edge is mapped independently and holds the
-          largest core its own pair supports, which is the cheapest transformation for that
-          pair. A ligand on three edges therefore holds three different cores.
-        - ``"graph"`` -- after selection, each ligand keeps the *intersection* of its cores
-          over all of its selected RBFE edges; the rest is demoted and the soft-core repair
-          is re-run on what remains, iterated to a fixed point. The network then shares one
-          genuine common core rather than a merely pairwise-compatible one.
+        A ladder from loosest to strictest:
 
-        The graph pass never re-selects, and it can leave a selected edge infeasible -- the
-        shared core is an intersection, so it is necessarily no larger than any pairwise
-        one. That is raised rather than absorbed; see :mod:`rbfenetmap.core.consistency`.
+        - ``"pairwise"`` (default) -- no requirement. Each edge is mapped independently and
+          holds the largest core its own pair supports, which is the cheapest
+          transformation for that pair. A ligand on three edges holds three cores, and
+          three soft-cores.
+        - ``"component"`` -- one core per ligand within each connected component of the
+          RBFE-only selected subgraph. Costs nothing to configure and is the scope that
+          works on a set whose scaffolds do not all map to each other, because such a set
+          fragments into exactly those components anyway.
+        - ``"graph"`` -- one core per ligand across *all* of its selected RBFE edges. The
+          strongest form, and the one that fails first: the shared core is an intersection
+          over the whole network, so one chemically distant ligand shrinks everyone's.
+
+        In every case the surviving core is the *intersection* of the pairwise ones, the
+        rest is demoted, and the soft-core repair re-runs on what remains, iterated to a
+        fixed point.
+
+        Two limits apply to all of them. **CBFE edges are exempt** -- a counterpoised edge
+        has no common core by construction, so reading one as "this ligand's core is empty
+        here" would erase the core of every ligand a bridge touches. And the pass never
+        re-selects; it can leave a selected edge infeasible, which is raised rather than
+        absorbed. See :mod:`rbfenetmap.core.consistency`.
     cbfe_mode : {"off", "bridge", "cycles", "all"}
         How freely the planner may spend counterpoised (CBFE) edges. A CBFE edge needs no
         atom mapping, so it is available between *any* two ligands -- including the pairs
@@ -417,7 +440,7 @@ class NetworkOptions:
     adaptive_batch_size: int = 32
     show_progress: bool = False
     jobs: int = 1
-    consistency: Literal["pairwise", "graph"] = "pairwise"
+    consistency: ConsistencyScope = "pairwise"
     cbfe_mode: CBFEMode = "off"
     cbfe_base_cost: float = 8.0
     cbfe_atom_weight: float = 0.05
@@ -444,8 +467,8 @@ class NetworkOptions:
             raise ValueError("selection_objective must be 'uniform_redundancy' or 'connectivity_then_cycles'.")
         if self.max_cycle_size is not None and self.max_cycle_size < 3:
             raise ValueError("max_cycle_size must be at least 3 when set.")
-        if self.consistency not in ("pairwise", "graph"):
-            raise ValueError(f"consistency must be 'pairwise' or 'graph'; got {self.consistency!r}.")
+        if self.consistency not in CONSISTENCY_SCOPES:
+            raise ValueError(f"consistency must be one of {list(CONSISTENCY_SCOPES)}; got {self.consistency!r}.")
         if self.pair_evaluation not in ("eager", "adaptive"):
             raise ValueError("pair_evaluation must be 'eager' or 'adaptive'.")
         if self.adaptive_initial_neighbors < 1:

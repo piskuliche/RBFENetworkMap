@@ -45,6 +45,25 @@ def consistent(series) -> Network:
     return build_network(series, network_options=NetworkOptions(consistency="graph"))
 
 
+def _softcore_by_ligand(network: Network) -> dict[str, set[frozenset[int]]]:
+    """The distinct **soft-cores** each ligand holds across its RBFE edges.
+
+    Deliberately separate from :func:`_core_by_ligand` and asserted on directly rather than
+    inferred from it. The soft-core is what the feature is asked for by name -- an Amber
+    ``scmask`` is a soft-core, not a core -- and "the complement is a partition, so the two
+    are equivalent" is a true statement about ``AtomMapping`` that a bug in this module
+    could not violate but a bug in ``_restrict`` very much could, by handing back a mapping
+    whose halves no longer correspond.
+    """
+    held: dict[str, set[frozenset[int]]] = {}
+    for edge in network.edges:
+        if edge.kind is not EdgeKind.RBFE:
+            continue
+        held.setdefault(edge.source, set()).add(frozenset(edge.mapping.sc1))
+        held.setdefault(edge.target, set()).add(frozenset(edge.mapping.sc2))
+    return held
+
+
 def _core_by_ligand(network: Network) -> dict[str, set[frozenset[int]]]:
     """The distinct cores each ligand holds across its RBFE edges."""
     held: dict[str, set[frozenset[int]]] = {}
@@ -137,3 +156,94 @@ class TestGraphConsistency:
         cores = graph_consistent_cores(network)
         assert cores["bza_F"] == frozenset(range(6))
         assert "bza_Cl" not in cores
+
+
+class TestSoftcoreUniformity:
+    """The property the feature is actually asked for, asserted on ``sc1``/``sc2``.
+
+    Not marked ``integration``. The core-side equivalent is, which is why it took a user
+    asking "could you add a knob for this?" to notice the feature already existed -- the
+    assertion that would have shown it was deselected in the run everyone watches.
+    """
+
+    def test_pairwise_lets_a_ligand_hold_several_softcores(self, pairwise):
+        """The premise, so the assertion below cannot pass vacuously."""
+        offenders = {name for name, held in _softcore_by_ligand(pairwise).items() if len(held) > 1}
+        assert offenders == {"bza_Et", "bza_Me"}
+
+    def test_graph_leaves_every_ligand_holding_exactly_one(self, consistent):
+        assert all(len(held) == 1 for held in _softcore_by_ligand(consistent).values())
+
+    def test_the_softcore_is_the_exact_complement_of_the_core(self, consistent):
+        """What makes one core per ligand *mean* one soft-core per ligand."""
+        for edge in consistent.edges:
+            for cc, sc, total in (
+                (edge.mapping.cc1, edge.mapping.sc1, edge.mapping.n_atoms_1),
+                (edge.mapping.cc2, edge.mapping.sc2, edge.mapping.n_atoms_2),
+            ):
+                assert set(cc).isdisjoint(sc)
+                assert set(cc) | set(sc) == set(range(total))
+
+
+@pytest.fixture(scope="module")
+def by_component(series) -> Network:
+    """The same network with the rule scoped to each connected component."""
+    return build_network(series, network_options=NetworkOptions(consistency="component"))
+
+
+class TestScope:
+    """``component`` asks for the rule within a component; ``graph`` across the network."""
+
+    def test_component_also_leaves_one_softcore_per_ligand(self, by_component):
+        assert all(len(held) == 1 for held in _softcore_by_ligand(by_component).values())
+
+    def test_on_a_connected_series_the_two_scopes_agree(self, by_component, consistent):
+        """One component means one group, so there is nothing for the scope to change."""
+        assert _softcore_by_ligand(by_component) == _softcore_by_ligand(consistent)
+
+    def test_a_boundary_edge_is_exempt(self, series):
+        """The tradeoff scoping makes, pinned rather than left to be discovered.
+
+        Two groups joined by one edge: the ligands either side of it are not being asked to
+        share anything, so that edge keeps its pairwise core. Feeding it into both groups'
+        intersections is not the alternative -- the constraint would propagate across the
+        join and collapse the scope back to ``graph``.
+        """
+        from rbfenetmap.core.consistency import consistency_groups
+
+        network = build_network(series, network_options=NetworkOptions(consistency="component"))
+        groups = consistency_groups(network, "component")
+        assert len(set(groups.values())) == 1  # this series is one component
+        assert consistency_groups(network, "graph") is None
+
+    def test_pairwise_is_the_only_scope_that_does_nothing(self, series, pairwise):
+        untouched = build_network(series, network_options=NetworkOptions(consistency="pairwise"))
+        assert _softcore_by_ligand(untouched) == _softcore_by_ligand(pairwise)
+
+
+class TestHydrogensAreIntersectedByCount:
+    """Why the intersection is heavy-atom-first rather than index-wise.
+
+    Two edges out of one ligand routinely core *different* hydrogens of a symmetric group;
+    which one got paired is an artefact of the embedding. Intersecting raw indices drops
+    both and keeps the parent, and a demoted hydrogen on a common-core parent is its own
+    soft-core region -- so the repair pays to bridge regions the intersection invented, and
+    the cascade eats the core. Measured before the fix: every edge of a three-scaffold set
+    failed with the heavy core untouched at nine atoms.
+    """
+
+    def test_a_cored_hydrogen_keeps_its_parent(self, consistent, series):
+        from rbfenetmap.core.molgraph import hydrogen_parents
+
+        for edge in consistent.edges:
+            if edge.kind is not EdgeKind.RBFE:
+                continue
+            parents = hydrogen_parents(series[edge.source].mol)
+            core = set(edge.mapping.cc1)
+            orphans = {h for h in core if h in parents and parents[h] not in core}
+            assert not orphans, f"{edge.key}: cored hydrogen(s) {sorted(orphans)} without their parent"
+
+    def test_the_documented_core_sizes_are_unchanged(self, consistent):
+        """The heavy-first rewrite must not move the series this feature is documented on."""
+        after = {edge.unordered_key: edge.mapping.n_common_core for edge in consistent.edges}
+        assert after[("bza_Et", "bza_Me")] == 15

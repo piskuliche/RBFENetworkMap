@@ -504,9 +504,14 @@ def add_network_arguments(parser: argparse.ArgumentParser) -> None:
     )
     group.add_argument(
         "--consistency",
-        choices=("pairwise", "graph"),
+        choices=("pairwise", "component", "graph"),
         default="pairwise",
-        help="'graph' intersects each ligand's core across all its edges (default: %(default)s).",
+        help=(
+            "Require each ligand to hold one common core -- and so one soft-core, and one Amber "
+            "scmask -- across its RBFE edges. 'component' asks for it within each connected "
+            "component of the RBFE network, 'graph' across the whole of it. CBFE edges are exempt "
+            "either way. Default: %(default)s."
+        ),
     )
     group.add_argument(
         "--jobs",

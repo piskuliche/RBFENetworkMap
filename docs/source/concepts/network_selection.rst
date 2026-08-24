@@ -77,11 +77,69 @@ supports -- the cheapest transformation for that pair. A ligand sitting on three
 therefore holds three different cores, one per partner, and nothing requires them to agree.
 Whether an atom is "in the core" is a question that can only be answered per edge.
 
-``--consistency graph`` answers it per *ligand*. After selection, each ligand keeps the
-**intersection** of its cores over all of its selected RBFE edges; everything else is
-demoted to soft-core and the repair is re-run on what remains. The network then shares one
-genuine common core rather than a merely pairwise-compatible one, which is what a group of
-ligands sharing a scaffold means -- and what a per-cluster Amber setup wants.
+``--consistency`` answers it per *ligand*. After selection, each ligand keeps the
+**intersection** of its cores over its selected RBFE edges; everything else is demoted to
+soft-core and the repair is re-run on what remains. The network then shares one genuine
+common core rather than a merely pairwise-compatible one, which is what a group of ligands
+sharing a scaffold means -- and what a per-cluster Amber setup wants.
+
+One core per ligand *is* one soft-core per ligand
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Worth stating outright, because it is the reason most people want this and it is not
+obvious from the name. A mapping's common core and soft-core are a strict partition of a
+ligand's atoms -- disjoint, and jointly covering every one of them, checked on construction
+in :mod:`rbfenetmap.core.validate`. So pinning a ligand's core across its edges pins its
+soft-core to the exact complement.
+
+If you came here asking "can a ligand be made to have the same soft-core region in all of
+its transformations?", this is that knob. And the practical form of the question is usually
+about Amber: **the** ``scmask`` **is the soft-core**, so a ligand with one core across its
+edges has one ``scmask`` across them too.
+
+Scope: how widely the rule applies
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 16 84
+
+   * - Value
+     - The rule
+   * - ``pairwise``
+     - **Default.** No requirement; each edge holds the largest core its own pair supports.
+   * - ``component``
+     - One core per ligand within each connected component of the RBFE-only selected
+       subgraph. Costs nothing to configure.
+   * - ``graph``
+     - One core per ligand across *all* of its selected RBFE edges. The strongest form, and
+       the one that fails first: the intersection spans the whole network, so a single
+       chemically distant ligand shrinks everyone's core.
+
+An edge whose endpoints fall in different groups is **exempt**, exactly as a counterpoised
+edge is. So a ligand sitting on a boundary edge holds its group-uniform core on its internal
+edges and a different, pairwise one there. Feeding boundary edges into both groups'
+intersections is not the alternative it looks like: the constraint would propagate across
+the join and collapse the scope straight back to ``graph``.
+
+Hydrogens are intersected by count, not by index
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The intersection runs on **heavy atoms**, and hydrogens follow their parents -- the same
+division of labour the MCS search itself uses.
+
+Intersecting hydrogen indices directly is not merely wasteful, it is destructive. Two edges
+out of one ligand routinely put *different* hydrogens of a symmetric group in the core;
+which of a methyl's three got paired is an artefact of the embedding, not chemistry. The
+intersection then drops all of them and keeps the parent -- and a soft-core hydrogen on a
+common-core parent is its own region, because hydrogen-follows-parent is deliberately
+one-way. The repair is then made to bridge regions the intersection invented, and the
+cascade eats the core. On a three-scaffold set that failed every single edge, with the heavy
+core untouched at nine atoms.
+
+Counting asks the question that has a chemical answer -- *how many* hydrogens on this atom
+are shared, not *which* -- and the lowest-indexed that many are kept, which is the same
+choice on every edge and so is uniform by construction.
 
 It runs to a fixed point rather than in one pass. Demoting an atom on one side drops its
 partner on the other, which shrinks that ligand's core, which changes *its* intersection;
@@ -92,6 +150,25 @@ On the nine-ligand example series, one edge changes: ``bza_Me~bza_Et`` maps pair
 18-atom core -- those two ligands are more like each other than either is like the rest --
 while every other edge on either of them gets 15. Under ``graph`` it drops to 15 too, and
 the edge is re-costed upward to say so.
+
+Two limits, and one failure mode
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**CBFE edges are exempt.** A counterpoised edge has no common core by construction, so
+reading one as "this ligand's core is empty here" would erase the core of every ligand a
+bridge touches -- an artefact of the bridge, not a statement about the scaffold. The
+guarantee is therefore across a ligand's **RBFE** edges; with ``--cbfe off`` (the default)
+that is the same statement, and otherwise it is not.
+
+**The candidate pool is untouched.** Only selected edges are rewritten, so a network file
+written under a consistency scope carries consistent selected edges alongside *pairwise*
+candidates. Anything that re-plans from the candidate pool sees the pairwise cores.
+
+And it can fail: the shared core is an intersection, so it is never larger than any pairwise
+one, and a series whose members do not share enough scaffold cannot sustain it. That raises,
+naming each edge and quoting the repair's own trace -- which is the part worth reading, since
+the core is usually not shrunk to death by the intersection but eaten by the repair that
+follows it.
 
 Two things it deliberately does not do:
 

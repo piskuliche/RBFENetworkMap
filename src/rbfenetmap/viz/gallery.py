@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 from rbfenetmap.core.cost import network_cost_summary
 from rbfenetmap.core.diagnostics import summarize
 from rbfenetmap.core.models import EdgeKind
-from rbfenetmap.viz.depict import render_edge_svg
+from rbfenetmap.viz.depict import render_edge_svg, render_molecule_svg
 from rbfenetmap.viz.network_svg import render_network_svg
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -71,6 +71,22 @@ th { font-weight: 600; }
 .badge.rej { border-color: #c2553d; color: #c2553d; font-family: ui-monospace, monospace;
              text-transform: none; letter-spacing: 0; }
 .no-draw { font-size: .9rem; opacity: .85; font-style: italic; padding: .5rem 0; }
+/* Script-free before/after. The checkbox is clipped rather than display:none'd, so it
+   keeps its place in the tab order and can still be toggled from the keyboard. */
+.repair-toggle { position: absolute; width: 1px; height: 1px; overflow: hidden;
+                 clip: rect(0 0 0 0); white-space: nowrap; }
+.repair-label { display: inline-block; margin: .1rem 0 .6rem; padding: .3rem .7rem;
+                border: 1px solid #8886; border-radius: 999px; font-size: .85rem;
+                cursor: pointer; user-select: none; }
+.repair-label:hover { border-color: #4a90d9; }
+.repair-toggle:focus-visible + .repair-label { outline: 2px solid #4a90d9; outline-offset: 2px; }
+.repair-label .on { display: none; }
+.repair-toggle:checked + .repair-label .on { display: inline; }
+.repair-toggle:checked + .repair-label .off { display: none; }
+.panes.before { display: none; }
+.repair-toggle:checked ~ .panes.before { display: flex; }
+.repair-toggle:checked ~ .panes.after { display: none; }
+.pane-note { font-size: .85rem; opacity: .8; margin: -.2rem 0 .6rem; }
 """
 
 
@@ -143,6 +159,34 @@ def _has_common_core(candidate: "Transformation") -> bool:
     return bool(candidate.mapping.cc1)
 
 
+def pre_repair_partition(edge: "Transformation") -> tuple[tuple[int, ...], ...]:
+    """Return the ``(sc1, cc1, sc2, cc2)`` the mapper proposed, before any demotion.
+
+    The repair does not store the mapping it started from, and does not need to: it
+    records the atoms it demoted, and demotion only ever moves an atom from the common
+    core into the soft-core. Undoing that recovers the mapper's own partition exactly,
+    including the atoms the initial normalising closure pulled in.
+
+    Parameters
+    ----------
+    edge : Transformation
+        Must have ``repair.applied`` set; on an untouched edge this returns the current
+        partition, which is correct but pointless to draw.
+
+    Returns
+    -------
+    tuple[tuple[int, ...], ...]
+        ``(softcore_1, core_1, softcore_2, core_2)``, each sorted ascending.
+    """
+    demoted_1, demoted_2 = set(edge.repair.demoted_1), set(edge.repair.demoted_2)
+    return (
+        tuple(sorted(set(edge.mapping.sc1) - demoted_1)),
+        tuple(sorted(set(edge.mapping.cc1) | demoted_1)),
+        tuple(sorted(set(edge.mapping.sc2) - demoted_2)),
+        tuple(sorted(set(edge.mapping.cc2) | demoted_2)),
+    )
+
+
 def _edge_summary(edge: "Transformation") -> str:
     """Describe an edge's atom partition in the terms its kind actually uses.
 
@@ -163,6 +207,10 @@ def _edge_summary(edge: "Transformation") -> str:
 #: series rejects a handful -- while refusing to inline hundreds of SVGs when a threshold
 #: is set so tight that nothing passes.
 DEFAULT_MAX_REJECT_DEPICTIONS = 24
+
+#: How many repaired edges offer a before/after toggle. Two extra depictions each, and the
+#: cheapest edges are the ones a reader checks first, so the cap takes them in cost order.
+DEFAULT_MAX_REPAIR_COMPARISONS = 24
 
 #: The seed the report's robustness estimate is run with. Fixed rather than exposed: two
 #: renders of the same network file have to produce the same document, or the HTML report
@@ -209,6 +257,43 @@ def _diagnostics_section(network: "Network") -> list[str]:
     return parts
 
 
+def _repair_comparison(
+    edge: "Transformation", network: "Network", after_source: str, after_target: str, *, show_indices: bool
+) -> list[str]:
+    """Return the toggle, and both pane sets, for one repaired edge.
+
+    The repaired view is the *unchecked* state, so a reader who never touches the control
+    sees what will actually run. The mapper's original partition is the deliberate
+    departure, not the default.
+    """
+    sc1, cc1, sc2, cc2 = pre_repair_partition(edge)
+    source, target = network.ligands[edge.source], network.ligands[edge.target]
+    toggle_id = f"before-{edge.key}"
+    before_source = render_molecule_svg(
+        source.mol,
+        softcore=sc1,
+        core=cc1,
+        title=f"{edge.source} (soft-core {len(sc1)}, as mapped)",
+        show_indices=show_indices,
+    )
+    before_target = render_molecule_svg(
+        target.mol,
+        softcore=sc2,
+        core=cc2,
+        title=f"{edge.target} (soft-core {len(sc2)}, as mapped)",
+        show_indices=show_indices,
+    )
+    return [
+        f"<input type='checkbox' class='repair-toggle' id='{_escape(toggle_id)}'>",
+        f"<label class='repair-label' for='{_escape(toggle_id)}'>"
+        "<span class='off'>Show the soft-core as the mapper proposed it</span>"
+        "<span class='on'>Show the repaired soft-core</span></label>",
+        f"<div class='panes scroll after'>{after_source}{after_target}</div>",
+        f"<div class='panes scroll before'>{before_source}{before_target}</div>",
+        "<div class='pane-note before-note'></div>",
+    ]
+
+
 def render_report(
     network: "Network",
     *,
@@ -216,6 +301,8 @@ def render_report(
     show_indices: bool = False,
     reject_depictions: bool = True,
     max_reject_depictions: int = DEFAULT_MAX_REJECT_DEPICTIONS,
+    repair_comparison: bool = True,
+    max_repair_comparisons: int = DEFAULT_MAX_REPAIR_COMPARISONS,
 ) -> str:
     """Return a complete, self-contained HTML document describing *network*.
 
@@ -234,6 +321,14 @@ def render_report(
         the report from under 2 MB to over 10. The number omitted is always stated; a
         report that silently drew some of the rejections would be worse than one that drew
         none. Zero or negative means no limit.
+    repair_comparison : bool, optional
+        On a repaired edge, offer a toggle between the repaired soft-core and the one the
+        mapper proposed. On by default. The repaired view is what shows without touching
+        it, so the default output is unchanged from a reader's point of view.
+    max_repair_comparisons : int, optional
+        Stop offering the toggle after this many repaired edges, cheapest first. Each one
+        costs two more inlined depictions, and a dense network repairs 30 of its edges.
+        Zero or negative means no limit.
 
     Returns
     -------
@@ -334,15 +429,38 @@ def render_report(
             )
         parts.append("</div>")
 
+    all_repaired = [e for e in selected_edges if e.repair.applied]
+    repaired_budget = all_repaired if max_repair_comparisons <= 0 else all_repaired[:max_repair_comparisons]
+    comparable = {e.key for e in repaired_budget} if repair_comparison else set()
+    if comparable:
+        omitted = len(all_repaired) - len(repaired_budget)
+        note = (
+            f"{len(comparable)} of the {len(all_repaired)} repaired edges below can be toggled between "
+            "the repaired soft-core and the one the mapper proposed. The repaired view is what is shown."
+        )
+        if omitted:
+            # Saying so matters more than it looks: a reader who sees the control on some
+            # cards and not others would otherwise read its absence as "nothing was repaired
+            # here", which is the opposite of true.
+            note += (
+                f" The remaining <strong>{omitted}</strong> are repaired but carry no toggle, to keep the "
+                "page small; raise <code>--exporter-opt max_repair_comparisons=N</code> (0 for all)."
+            )
+        parts.append(f"<p class='meta'>{note}</p>")
+
     for edge in selected_edges:
         source_svg, target_svg = render_edge_svg(edge, network.ligands, show_indices=show_indices)
+        compare = edge.key in comparable
         parts += [
             f"<div class='edge' id='{_edge_anchor(edge.key)}'>",
             f"<h3>{_escape(edge.key)}{_badge(edge)}{_synthetic_badge(edge, network)}</h3>",
             f"<div class='meta'>cost {edge.score.total:.3f} &middot; {_edge_summary(edge)} &middot; "
             f"{'protocol' if edge.kind is EdgeKind.CBFE else 'mapper'} {_escape(edge.mapping.method)}</div>",
-            f"<div class='panes scroll'>{source_svg}{target_svg}</div>",
         ]
+        if compare:
+            parts += _repair_comparison(edge, network, source_svg, target_svg, show_indices=show_indices)
+        else:
+            parts.append(f"<div class='panes scroll'>{source_svg}{target_svg}</div>")
         if edge.repair.applied:
             trace = "\n".join(edge.repair.trace)
             parts.append(

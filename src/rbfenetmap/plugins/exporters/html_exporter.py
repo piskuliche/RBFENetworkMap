@@ -26,10 +26,11 @@ class HTMLGalleryExporter(AbstractExporter):
         destination : pathlib.Path
             A file, or a directory in which ``network.html`` is written.
         **options
-            ``title``, ``show_indices``, ``reject_depictions``, and
-            ``max_reject_depictions``.
+            ``title``, ``show_indices``, ``reject_depictions``,
+            ``max_reject_depictions``, ``repair_comparison``, and
+            ``max_repair_comparisons``.
         """
-        from rbfenetmap.viz.gallery import DEFAULT_MAX_REJECT_DEPICTIONS, render_report
+        from rbfenetmap.viz.gallery import DEFAULT_MAX_REJECT_DEPICTIONS, DEFAULT_MAX_REPAIR_COMPARISONS, render_report
 
         destination = Path(destination)
         path = destination / f"network{self.default_suffix}" if destination.is_dir() else destination
@@ -43,6 +44,10 @@ class HTMLGalleryExporter(AbstractExporter):
                 # --exporter-opt parses every number as a float, so an int() is required
                 # rather than merely tidy: a float slice bound raises.
                 max_reject_depictions=int(float(options.get("max_reject_depictions", DEFAULT_MAX_REJECT_DEPICTIONS))),
+                repair_comparison=bool(options.get("repair_comparison", True)),
+                max_repair_comparisons=int(
+                    float(options.get("max_repair_comparisons", DEFAULT_MAX_REPAIR_COMPARISONS))
+                ),
             )
         )
         return (path,)

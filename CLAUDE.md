@@ -68,9 +68,6 @@ Amber exporter writes `ligands/<name>.sdf` for every ligand plus an `intermediat
 manifest. If you touch that exporter, keep the invariant — every name in `edges.dat` has a
 file in `ligands/` — and the test that asserts it.
 
-**`--consistency graph` is a declared no-op.** It exists in `NetworkOptions` and the CLI and
-is read by nothing. Don't reach for it and don't assume it constrains anything.
-
 **`examples/data/benzamides.sdf` is gitignored**; regenerate it with
 `python examples/data/make_conformers.py`.
 

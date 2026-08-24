@@ -40,6 +40,36 @@ Pipeline
 
 .. automodule:: rbfenetmap.core.cbfe
 
+Diagnostics and cost
+--------------------
+
+.. automodule:: rbfenetmap.core.diagnostics
+
+.. automodule:: rbfenetmap.core.cost
+
+.. automodule:: rbfenetmap.core.clustering
+
+Optimal design
+--------------
+
+.. automodule:: rbfenetmap.core.design
+
+.. automodule:: rbfenetmap.core.consistency
+
+Surgery and diagnostics
+-----------------------
+
+.. automodule:: rbfenetmap.core.surgery
+
+.. automodule:: rbfenetmap.core.replanning
+
+Intermediate ligands
+--------------------
+
+.. automodule:: rbfenetmap.core.intermediates
+
+.. automodule:: rbfenetmap.core.posing
+
 Plugin registry
 ---------------
 
@@ -55,6 +85,8 @@ Contracts
 .. automodule:: rbfenetmap.core.meta.planners
 
 .. automodule:: rbfenetmap.core.meta.exporters
+
+.. automodule:: rbfenetmap.core.meta.intermediates
 
 Validation and errors
 ---------------------

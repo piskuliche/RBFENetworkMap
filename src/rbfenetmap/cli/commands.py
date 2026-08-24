@@ -16,12 +16,23 @@ from pathlib import Path
 from typing import Sequence
 
 from rbfenetmap.cli._args import build_alignment_options, build_mapping_options, build_network_options, parse_key_values
+from rbfenetmap.core.cost import network_cost_summary
+from rbfenetmap.core.diagnostics import edge_budget_advice, summarize
 from rbfenetmap.core.exceptions import NetworkPlanError, RBFENetworkMapError
-from rbfenetmap.core.models import EdgeKind, Ligand, Network, RejectionReason, Transformation, parse_edge_key
+from rbfenetmap.core.models import (
+    EDGE_SEPARATOR,
+    EdgeKind,
+    Ligand,
+    Network,
+    RejectionReason,
+    Transformation,
+    parse_edge_key,
+)
 from rbfenetmap.core.pipeline import build_candidate, build_network, evaluate_pairs
 from rbfenetmap.io.loaders import load_ligands
 
-__all__ = ("cmd_export", "cmd_inspect", "cmd_map", "cmd_plan", "cmd_plugins", "cmd_report", "cmd_score")
+__all__ = ("cmd_diagnose", "cmd_export", "cmd_inspect", "cmd_map", "cmd_plan", "cmd_plugins", "cmd_report", "cmd_score")
+__all__ = ("cmd_export", "cmd_inspect", "cmd_map", "cmd_plan", "cmd_plugins", "cmd_replan", "cmd_report", "cmd_score")
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +219,105 @@ def _run_exports(network: Network, names: Sequence[str], directory: Path, option
     return written
 
 
+def _cost_line(network: Network, units: str) -> str:
+    """One line stating what the network costs, in the requested units.
+
+    Both figures are always computed; only the phrasing changes. They answer different
+    questions -- the scorer total says how hard the edges are, the GPU-hour figure says
+    whether the run fits in an allocation -- so neither is a conversion of the other and
+    reporting the wrong one silently is the failure worth avoiding.
+    """
+    totals = network_cost_summary(network)
+    if units == "gpu_hours":
+        return f"cost {totals['gpu_hours']:.1f} GPU-hours (about ${totals['price']:.2f})"
+    return f"cost {totals['score']:.3f} (scorer units)"
+
+
+def cmd_diagnose(args: argparse.Namespace) -> int:
+    """Report network-level metrics for an already-planned network.
+
+    ``inspect`` is per-edge; this is per-network. The two are separate commands rather
+    than flags on one because they answer questions at different scales, and a table that
+    tried to do both would serve neither.
+    """
+    from rbfenetmap.io.networkio import load_network
+
+    network = load_network(Path(args.network))
+    report = summarize(
+        network,
+        seed=args.seed,
+        failure_rate=args.failure_rate,
+        n_repeats=args.repeats,
+        max_cycle_length=args.max_cycle_length,
+    )
+    degrees, robustness, budget = report["degrees"], report["robustness"], report["budget"]
+    totals = network_cost_summary(network)
+
+    if args.format == "json":
+        print(
+            json.dumps(
+                {
+                    "n_ligands": report["n_ligands"],
+                    "n_edges": report["n_edges"],
+                    "n_rbfe": report["n_rbfe"],
+                    "n_cbfe": report["n_cbfe"],
+                    "cost": report["cost"],
+                    "efficiency": report["efficiency"],
+                    "gpu_hours": totals["gpu_hours"],
+                    "price": totals["price"],
+                    "n_cycles": report["n_cycles"],
+                    "max_cycle_length": report["max_cycle_length"],
+                    "degree": {
+                        "min": degrees.minimum,
+                        "mean": degrees.mean,
+                        "max": degrees.maximum,
+                        "isolated": list(degrees.isolated),
+                        "per_ligand": degrees.degrees,
+                    },
+                    "diameter": report["diameter"],
+                    "robustness": {
+                        "connected_fraction": robustness.connected_fraction,
+                        "mean_ligands_retained": robustness.mean_ligands_retained,
+                        "failure_rate": robustness.failure_rate,
+                        "n_repeats": robustness.n_repeats,
+                        "seed": robustness.seed,
+                    },
+                    "edge_budget": {
+                        "recommended": budget.recommended,
+                        "shortfall": budget.shortfall,
+                        "message": budget.message,
+                    },
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    rows = [
+        ["ligands", str(report["n_ligands"])],
+        ["edges", f"{report['n_edges']} ({report['n_rbfe']} RBFE, {report['n_cbfe']} CBFE)"],
+        ["cost", _cost_line(network, args.cost_units).removeprefix("cost ")],
+        ["efficiency", f"{report['efficiency']:.3f} per edge (scorer units)"],
+        ["degree", f"min {degrees.minimum}, mean {degrees.mean:.2f}, max {degrees.maximum}"],
+        ["isolated", ", ".join(degrees.isolated) or "none"],
+        ["diameter", "disconnected" if report["diameter"] is None else str(report["diameter"])],
+        ["cycles", f"{report['n_cycles']} of length <= {report['max_cycle_length']}"],
+        [
+            "robustness",
+            f"{robustness.connected_fraction:.0%} of {robustness.n_repeats} trials stay connected at "
+            f"{robustness.failure_rate:.0%} edge failure; {robustness.mean_ligands_retained:.1f} ligands "
+            f"retained on average (seed {robustness.seed})",
+        ],
+    ]
+    print(_format_table(rows, ["metric", "value"]))
+    print(f"\n{budget.message}")
+    if network.unmet_constraints:
+        print("\nUnmet constraints:", file=sys.stderr)
+        for constraint in network.unmet_constraints:
+            print(f"  - {constraint}", file=sys.stderr)
+    return 0
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
     """Plan a network and write it out."""
     ligands = _load(args)
@@ -254,7 +364,17 @@ def cmd_plan(args: argparse.Namespace) -> int:
     summary = f"Planned {len(network.edges)} edge(s) over {len(network.ligands)} ligand(s) -> {out}"
     if network.cbfe_edges:
         summary += f"\n  {len(network.rbfe_edges)} RBFE, {len(network.cbfe_edges)} CBFE"
+    summary += "\n  " + _cost_line(network, getattr(args, "cost_units", "score"))
+    if network.synthetic_ligands:
+        # Named, not counted. An invented vertex is a molecule the user must parameterise
+        # and simulate, so "3 intermediates" is not something anyone can act on.
+        invented = ", ".join(ligand.name for ligand in network.synthetic_ligands)
+        summary += f"\n  {len(network.synthetic_ligands)} invented ligand(s): {invented}"
     print(summary)
+    # Advice, not a warning: with edges_per_ligand=2 the default network is always below
+    # the n*ln(n) floor, so warnings.warn would fire on every run this package has ever
+    # planned and be tuned out within a week. See core.diagnostics.
+    print(f"  {edge_budget_advice(len(network.ligands), len(network.edges)).message}")
     rows = [
         [
             edge.key,
@@ -415,6 +535,53 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_replan(args: argparse.Namespace) -> int:
+    """Prune high-LMI edges from a planned network and replan the gaps.
+
+    The pruned edges are printed rather than only recorded, because the network JSON's
+    options block does not persist ``banned_edges``: without the printout the fact that
+    anything was pruned would survive only in this terminal.
+    """
+    from rbfenetmap.core.replanning import load_edge_lmi, replan_after_diagnostics
+    from rbfenetmap.io.networkio import dump_network, load_network
+
+    network = load_network(Path(args.network))
+    lmi = load_edge_lmi(Path(args.lmi))
+    replanned, pruned = replan_after_diagnostics(
+        network,
+        lmi,
+        threshold=args.lmi_threshold,
+        quantile=args.lmi_quantile,
+        max_pruned=args.max_pruned,
+        require_complete=not args.allow_missing_lmi,
+        keep_existing=not args.reselect,
+        planner=args.planner,
+    )
+
+    if not pruned:
+        print("No edge exceeds the LMI cut; the network is unchanged.")
+    else:
+        print(f"Pruned {len(pruned)} edge(s) on their Lagrange Multiplier Index:")
+        rows = [[f"{a}{EDGE_SEPARATOR}{b}", f"{lmi[(a, b)]:.4g}"] for a, b in pruned]
+        print(_format_table(rows, ["edge", "lmi"]))
+
+    before = {edge.unordered_key for edge in network.edges}
+    after = {edge.unordered_key for edge in replanned.edges}
+    added = sorted(after - before)
+    if added:
+        print(f"\nReplanned with {len(added)} replacement edge(s):")
+        print(_format_table([[f"{a}{EDGE_SEPARATOR}{b}"] for a, b in added], ["edge"]))
+
+    out = Path(args.out)
+    dump_network(replanned, out)
+    print(f"\n{len(replanned.edges)} edge(s) over {len(replanned.ligands)} ligand(s) -> {out}")
+    if replanned.unmet_constraints:
+        print("\nUnmet constraints:", file=sys.stderr)
+        for constraint in replanned.unmet_constraints:
+            print(f"  - {constraint}", file=sys.stderr)
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     """Render a self-contained HTML report of a planned network."""
     from rbfenetmap.io.networkio import load_network
@@ -431,6 +598,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 def cmd_plugins(args: argparse.Namespace) -> int:
     """List registered plugins and their availability."""
     from rbfenetmap.plugins.exporters import BUILTIN_EXPORTERS
+    from rbfenetmap.plugins.intermediates import BUILTIN_INTERMEDIATES
     from rbfenetmap.plugins.mappers import BUILTIN_MAPPERS
     from rbfenetmap.plugins.planners import BUILTIN_PLANNERS
     from rbfenetmap.plugins.scorers import BUILTIN_SCORERS
@@ -440,6 +608,7 @@ def cmd_plugins(args: argparse.Namespace) -> int:
         "scorer": BUILTIN_SCORERS,
         "planner": BUILTIN_PLANNERS,
         "exporter": BUILTIN_EXPORTERS,
+        "intermediate": BUILTIN_INTERMEDIATES,
     }
     kinds = [args.kind] if args.kind else list(tables)
 

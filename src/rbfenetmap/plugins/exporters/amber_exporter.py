@@ -15,19 +15,47 @@ there is no mapping to convey -- so ``cbfe/`` contains only the edge list.
 
 A network that is entirely RBFE keeps the flat, historical layout, so existing callers see
 no change.
+
+When ``design_total_ns`` is set, each runconfig also carries a ``sample_allocation`` block:
+the A-optimal share of the total simulation budget for that edge, and a lambda-window count
+scaled to it. See :meth:`AmberExporter._sample_allocation` for why that computation lives
+here rather than in the planner.
+Structures are written too, into ``ligands/``, and that is not a convenience
+-----------------------------------------------------------------------------
+
+``edges.dat`` names residues, and ``BuildEdges`` needs a parameterised topology for every
+one of them. Before intermediate generation existed, every name in that file was a molecule
+the user had supplied and could find on their own disk. It is not any more: an invented
+ligand exists only inside the planned network, nobody has ever seen it, and an
+``edges.dat`` naming one with no structure beside it is a setup that fails deep inside
+someone else's tooling with an error about a missing residue.
+
+So every ligand is written as ``ligands/<name>.sdf`` -- the real ones as well, because an
+invariant that holds for the whole file ("every name in ``edges.dat`` has a structure in
+``ligands/``") is one a script can check, while "every name except the ones you already
+had" is not. Invented ligands are additionally listed in ``intermediates.txt`` with their
+parents and the generator that proposed them, so a setup script can tell which residues
+need parameterising before anything can run.
 """
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Any, ClassVar, Sequence
 
 from rbfenetmap.core.exceptions import ExporterError
 from rbfenetmap.core.meta.exporters import AbstractExporter
-from rbfenetmap.core.models import EDGE_SEPARATOR, EdgeKind, Network, Transformation
+from rbfenetmap.core.models import EDGE_SEPARATOR, EdgeKind, Ligand, Network, Transformation
 from rbfenetmap.io.amber_masks import DEFAULT_RESIDUE_NAMES, build_amber_masks
 
 __all__ = ("AmberExporter",)
+
+#: Subdirectory holding one SDF per ligand.
+LIGAND_DIRECTORY = "ligands"
+
+#: Manifest of the ligands this package invented: ``<name> <parent> <parent> <generator>``.
+INTERMEDIATE_MANIFEST = "intermediates.txt"
 
 
 class AmberExporter(AbstractExporter):
@@ -47,11 +75,39 @@ class AmberExporter(AbstractExporter):
         completed -- which for a large series is many minutes of work discarded over a
         problem that was knowable from the inputs alone.
 
+        Also **warns** about invented ligands, or about generation merely being enabled
+        when the pre-flight network has none yet. It is a warning rather than a refusal
+        because an invented ligand is a correct result that carries an obligation: every
+        one of them is a residue somebody has to parameterise, and the moment to learn
+        that is before the run, not when ``BuildEdges`` fails on a residue nobody has ever
+        seen.
+
         Raises
         ------
         rbfenetmap.core.exceptions.ExporterError
             Reporting every offending edge at once, not just the first.
         """
+        synthetic = network.synthetic_ligands
+        if synthetic:
+            warnings.warn(
+                f"{len(synthetic)} of {len(network.ligands)} ligand(s) were invented by this package and "
+                f"need parameterising before the edges can run: {', '.join(item.name for item in synthetic)}. "
+                f"Their structures are written to {LIGAND_DIRECTORY}/ and listed in {INTERMEDIATE_MANIFEST}.",
+                UserWarning,
+                stacklevel=2,
+            )
+        elif network.options is not None and network.options.generates_intermediates:
+            # The pre-flight call happens before planning, so there are no synthetic
+            # ligands to count yet -- but the fact that there may be some is knowable right
+            # now, and that is the point of a pre-flight check.
+            warnings.warn(
+                "Intermediate generation is enabled, so the exported edge list may name residues that were "
+                "not in the input. Their structures will be written to "
+                f"{LIGAND_DIRECTORY}/ and listed in {INTERMEDIATE_MANIFEST}; each still needs parameterising.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         problems: list[str] = []
         for edge in network.edges:
             if edge.kind is EdgeKind.CBFE:
@@ -79,6 +135,11 @@ class AmberExporter(AbstractExporter):
             ``residue_names`` -- the two residue names, default ``("SRC", "DST")``.
             ``aggregate`` -- also write a single ``atommaps.runconfig`` keyed by edge,
             which guimapper can open as a multi-edge document.
+            ``write_ligands`` -- write ``ligands/<name>.sdf`` for every ligand and, when
+            any were invented, ``intermediates.txt``. Default ``True``. Turning it off is
+            for a caller who is regenerating only the edge files over an export directory
+            whose structures are already correct; it is **not** a way to shrink an export
+            that names an invented ligand, which would produce a directory nobody can run.
 
         Returns
         -------
@@ -102,13 +163,22 @@ class AmberExporter(AbstractExporter):
         split = bool(cbfe_edges)
         written: list[Path] = []
 
+        # Before the edge lists, so a partial export never leaves a file naming a residue
+        # whose structure has not been written yet.
+        if bool(options.get("write_ligands", True)):
+            written += self._write_structures(network, destination)
+
         rbfe_dir = destination / "rbfe" if split else destination
         rbfe_dir.mkdir(parents=True, exist_ok=True)
         written += self._write_edge_lists(rbfe_dir, rbfe_edges)
 
+        allocation = self._sample_allocation(network)
+
         payloads: dict[str, dict[str, Any]] = {}
         for edge in rbfe_edges:
             payload = self._edge_payload(network, edge, residue_names)  # type: ignore[arg-type]
+            if edge.unordered_key in allocation:
+                payload["sample_allocation"] = allocation[edge.unordered_key]
             payloads[edge.key] = payload
             path = rbfe_dir / f"atommap_{edge.key}{self.default_suffix}"
             path.write_text(yaml.safe_dump(payload, sort_keys=False, default_flow_style=False))
@@ -128,6 +198,124 @@ class AmberExporter(AbstractExporter):
             written += self._write_edge_lists(cbfe_dir, cbfe_edges)
 
         return tuple(written)
+
+    @staticmethod
+    def _sample_allocation(network: Network) -> dict[tuple[str, str], dict[str, float | int]]:
+        """Return the per-edge lambda-window and nanosecond budget, or ``{}`` if unrequested.
+
+        Parameters
+        ----------
+        network : Network
+
+        Returns
+        -------
+        dict[tuple[str, str], dict[str, float | int]]
+            Keyed by unordered endpoint pair. Each value carries ``simulation_ns``, the
+            A-optimal share of ``design_total_ns``; ``lambda_windows``, that share mapped
+            onto the requested window range; and ``predicted_sigma_kcal``, the cost the
+            allocation was derived from, so a reader can see what it was based on.
+
+        Notes
+        -----
+        The runconfig is the natural home for this. It is already written once per edge,
+        it is already the interoperability contract with amberstudio and guimapper, and a
+        second file keyed by edge would have to be kept in step with it by hand.
+
+        Computed here rather than in the planner deliberately: an allocation is a statement
+        about *how to run* the network, not about which edges it contains, and computing it
+        at export time means a network read back from JSON months later can still be
+        allocated -- against a different budget, without replanning.
+
+        Returns ``{}`` rather than a uniform split when ``design_total_ns`` is unset. A
+        uniform split is a real decision about how to spend machine time, and writing one
+        into every runconfig by default would silently override whatever the user's own
+        protocol said.
+
+        The allocation reads :attr:`EdgeScore.total
+        <rbfenetmap.core.models.EdgeScore.total>` as a standard deviation in kcal/mol,
+        which is true of the ``variance`` scorer and of no other. Under a different scorer
+        the numbers are still internally consistent -- an edge the scorer disliked gets
+        more time -- but they are not variances, and the twofold variance reduction the
+        method promises is not on offer.
+        """
+        options = network.options
+        if options is None or options.design_total_ns is None or not network.edges:
+            return {}
+
+        from rbfenetmap.core.design import allocate_effort
+
+        nodes = sorted(network.ligands)
+        pairs = [edge.unordered_key for edge in network.edges]
+        sigmas = [max(float(edge.score.total), 1e-9) for edge in network.edges]
+        try:
+            effort = allocate_effort(nodes, pairs, sigmas, total=options.design_total_ns)
+        except ValueError:
+            # A disconnected network has an unbounded criterion, so there is no optimal
+            # allocation to compute. Exporting is still perfectly valid -- the user asked
+            # for --allow-disconnected somewhere upstream -- so omit the block rather than
+            # failing an export over an optional annotation.
+            return {}
+
+        values = list(effort.values())
+        low, high = min(values), max(values)
+        span = high - low
+        windows_low, windows_high = options.design_lambda_min, options.design_lambda_max
+        allocation: dict[tuple[str, str], dict[str, float | int]] = {}
+        for pair, sigma in zip(pairs, sigmas):
+            share = effort[pair]
+            fraction = (share - low) / span if span > 0 else 0.0
+            allocation[pair] = {
+                "lambda_windows": int(round(windows_low + fraction * (windows_high - windows_low))),
+                "simulation_ns": round(float(share), 4),
+                "predicted_sigma_kcal": round(float(sigma), 4),
+            }
+        return allocation
+
+    @staticmethod
+    def _write_structures(network: Network, destination: Path) -> list[Path]:
+        """Write one SDF per ligand, plus the manifest of the invented ones.
+
+        One file per ligand rather than one multi-record SDF, following the
+        ``--write-aligned`` precedent in :mod:`rbfenetmap.cli.commands`: the consumer here
+        is a setup script looking up a residue by name, and a name is a filename.
+
+        The manifest is written only when there is something to put in it, so an all-real
+        export gains no file that says "nothing happened". Its columns are
+        ``<name> <parent> <parent> <generator>``, whitespace-separated like ``edges.dat``,
+        because the script that reads one already parses the other positionally.
+        """
+        from rdkit import Chem
+
+        directory = destination / LIGAND_DIRECTORY
+        directory.mkdir(parents=True, exist_ok=True)
+        written: list[Path] = []
+        for name, ligand in network.ligands.items():
+            path = directory / f"{name}.sdf"
+            mol = Chem.Mol(ligand.mol)
+            mol.SetProp("_Name", name)
+            if ligand.provenance is not None:
+                # Carried on the structure as well as in the manifest: an SDF that leaves
+                # the export directory has to be able to say what it is on its own.
+                mol.SetProp("rbfenet_synthetic", "1")
+                mol.SetProp("rbfenet_parents", " ".join(ligand.provenance.parents))
+                mol.SetProp("rbfenet_generator", ligand.provenance.generator)
+                mol.SetProp("rbfenet_pose_rmsd", f"{ligand.provenance.pose_rmsd:.3f}")
+            writer = Chem.SDWriter(str(path))
+            writer.write(mol)
+            writer.close()
+            written.append(path)
+
+        synthetic: Sequence[Ligand] = network.synthetic_ligands
+        if synthetic:
+            manifest = destination / INTERMEDIATE_MANIFEST
+            manifest.write_text(
+                "".join(
+                    f"{ligand.name} {' '.join(ligand.provenance.parents)} {ligand.provenance.generator}\n"
+                    for ligand in synthetic
+                )
+            )
+            written.append(manifest)
+        return written
 
     @staticmethod
     def _write_edge_lists(directory: Path, edges: Sequence[Transformation]) -> list[Path]:

@@ -39,8 +39,8 @@ Four stages, each pluggable:
 2. **Repair** — the interesting part. A mapper may leave the soft-core in several
    disconnected pieces, which no single alchemical transformation can run. The repair
    demotes common-core atoms until the pieces join up, or rejects the edge.
-3. **Score** — reduce descriptors to a cost (`linear`, `lomaplike`, `softcore-size`).
-4. **Plan** — select the final edge set (`mst`, `star`, `explicit`, `complete`).
+3. **Score** — reduce descriptors to a cost (`linear`, `lomaplike`, `softcore-size`, `variance`).
+4. **Plan** — select the final edge set (`mst`, `star`, `explicit`, `complete`, `optimal`).
 
 ## The soft-core repair
 
@@ -97,6 +97,7 @@ The feasible candidate graph is disconnected: 2 components.
 
 | knob | effect |
 |---|---|
+| `--compat v0.4` | Pin every algorithmic knob to what a released version used, so a network stays reproducible after a default moves. Ligand intent, `--align`, and `--jobs`/`--progress` are not pinned and may be combined with it; naming a pinned knob is refused as a contradiction. |
 | `--n-edges` | Cap on total edges. Below `n_ligands - 1` with connectivity required is a **hard error**, never a silent trim. |
 | `--edges-per-ligand` | Target minimum degree. Best-effort; shortfalls are warned and recorded. |
 | `--min-cycle-coverage` | Fraction of ligands on a cycle. Cycles make free energies checkable against themselves. |
@@ -104,15 +105,45 @@ The feasible candidate graph is disconnected: 2 components.
 | `--max-cycle-size` | During cycle coverage, ignore candidate additions that would only make larger cycles than this. |
 | `--pair-evaluation adaptive` | Fingerprint-rank all pairs and run expensive mappings in batches until connectivity and redundancy targets are met. |
 | `--cbfe {off,bridge,cycles,all}` | Use counterpoised edges, which need no atom mapping and so are available between *any* two ligands. See below. |
+| `--design {none,a_optimal,d_optimal}` | Select edges by a statistical criterion instead of by cost, using the `optimal` planner. Needs `--scorer variance`, whose totals are predicted standard deviations in kcal/mol. Prefer `d_optimal` when a cycle-closure correction will be applied downstream. See below. |
+| `--design-total-ns` | Split a simulation budget A-optimally across the selected edges and write it into each Amber `.runconfig`. |
+| `--intermediates {off,bridge,gaps}` | Invent a bridging ligand for pairs no mapping can relate, turning one impossible edge into two possible ones. The invented molecule is posed against its parents and its sub-edges face the same feasibility checks as any other edge; a proposal whose sub-edges do not survive is dropped whole, molecules included. Budgeted out of `--n-edges`, never on top of it. See below. |
 | `--progress` / `--no-progress` | Show or suppress pair-mapping progress. Interactive CLI runs show it automatically. |
 | `--forced-edge` / `--banned-edge` | Absolute. A forced edge bypasses scoring but not feasibility. |
 | `--max-softcore-atoms` | A *feasibility* knob: it changes the candidate pool, not the selection. |
+| `--consistency graph` | Give every ligand **one** core across all of its edges — the intersection of its pairwise cores — instead of a different core per partner. Applied after selection and re-repaired to a fixed point. |
 | `--charge-change-policy` | `allow` / `penalize` / `reject`. |
 | `--ring-policy none` | Permit half-broken rings, for deliberate ring-opening work. |
 
 Selection guarantees a spanning network **iff** the feasible candidate graph is
 connected: the MST is built first, the redundancy pass only ever adds, and conflicting
 budgets are rejected up front rather than by trimming the tree.
+
+## Statistical optimal design
+
+The Fisher information matrix of a network of relative measurements **is** its weighted
+graph Laplacian: `F_ij = -1/sigma_ij^2` off the diagonal, `F_ii = sum_k 1/sigma_ik^2`, and
+`C = pinv(F)`. That single identity turns edge selection into a matrix-criterion problem.
+
+```bash
+rbfenet plan --ligands ligands.sdf \
+             --scorer variance --planner optimal --design d_optimal \
+             --design-total-ns 500 --out network.json
+```
+
+- **A-optimal** minimises `tr(C)`, the summed variance of the estimates.
+- **D-optimal** minimises `ln det(C)`. Because a Laplacian's pseudo-determinant counts
+  spanning trees, it produces 40–80% more cycles at equal edge count — which is why it is
+  the recommendation whenever cycle-closure correction will be applied.
+
+`--design` under any other planner is **refused, not ignored**, and `--planner optimal`
+without a criterion is refused too. With `--n-edges` unset the design planner uses Pitman's
+floor, `round(n ln n)`; the `mst` planner's default is unchanged.
+
+> **Optimal design buys precision. It does not promise accuracy.** Over five TYK2
+> iterations NetBFE's `tr(C)` fell monotonically 1.08 → 0.78 while the RMSE against
+> experiment *rose* 0.84 → 0.91. Read a falling `tr(C)` as "statistics are no longer the
+> bottleneck", not as evidence the answers improved.
 
 ## Counterpoised (CBFE) edges
 
@@ -172,6 +203,83 @@ when a complete scored pair matrix is required. Interactive runs show completed 
 elapsed time, throughput, and estimated remaining time; pass `--progress` to retain this
 display when stderr is redirected to a log.
 
+## Surgery and replanning
+
+Nobody plans once. Ligands arrive in batches, edges fail to converge, and a new series gets
+joined onto one that is already running — and re-planning from scratch discards the mappings
+already computed *and* reshuffles edges that are already set up or queued.
+
+`rbfenetmap.core.surgery` edits an existing network instead. `Network` is frozen, so each
+operation returns a new one and the untouched edges keep their identity, mappings, and costs.
+
+```python
+from rbfenetmap.core.surgery import append_ligand, concatenate_networks, delete_edge
+
+bigger = append_ligand(network, new_ligand, n_edges=2)   # maps only the new ligand's pairs
+smaller = delete_edge(network, "lig_a~lig_b")            # refuses a bridge, and says which
+joined = concatenate_networks(series_1, series_2, n_bridges=2)
+```
+
+`cyclize_around_component` — which Konnektor declares and leaves as `NotImplementedError` —
+adds edges until every ligand in a named set lies on a cycle, which is the state one or two
+ligands are left in after an append or a deletion.
+
+Closing the loop, `rbfenet replan` ingests the per-edge **Lagrange Multiplier Index** from an
+edgembar network analysis, bans the worst edges, and re-selects the gaps from the candidate
+pool the original run already scored — mapping nothing new:
+
+```bash
+rbfenet replan --network network.json --lmi lmi.json --lmi-quantile 0.9 --out replanned.json
+```
+
+> **LMI pruning substantially reduces cycle-closure error and leaves MUE and RMSE against
+> experiment essentially unchanged.** Hysteresis is a *sampling* diagnostic, not an accuracy
+> predictor: a systematic error moves every edge around a cycle the same way and cancels
+> exactly where hysteresis would have shown it. Use this to find internally inconsistent
+> edges, not to chase agreement with experiment.
+
+The LMI file is a small JSON schema of this package's own (`{"lig_a~lig_b": 0.31, ...}`);
+reading edgembar's on-disk output directly is a follow-up.
+## Intermediate ligands
+
+Some pairs cannot be related by any mapping. `--intermediates` lets the pipeline *invent* a
+molecule that sits between them, turning one impossible edge into two possible ones.
+
+```bash
+rbfenet plan --ligands ligands.sdf --intermediates bridge --export amber --out network.json
+```
+
+**Be clear about what this buys.** IMERGE measured paths through an intermediate converging
+roughly **20% more slowly** than the direct path: two calculations replace one, and neither
+is free. The win is not speed and it is not accuracy on a pair that already works. It is
+the pairs where **the direct path does not converge at all**, where the choice is not "one
+calculation or two" but "two calculations or no comparison". Hence `off` by default, and
+`bridge` — only gaps that actually disconnect the network — before `gaps`.
+
+The default generator is `pairmap`, after
+[Furui *et al.*, *JCIM* 2025, 65, 705–721](https://doi.org/10.1021/acs.jcim.4c01634)
+(reference implementation [ohuelab/PairMap](https://github.com/ohuelab/PairMap), CC-BY;
+this implementation is re-derived from the paper, not adapted from that code). It emits a
+small *subnetwork* rather than a chain — the cheapest path from one parent to the other,
+plus what it takes to put each of its links in a short cycle. The smallest shape is
+`A–M1–B–M2–A`: two independent routes across a pair that had no direct edge at all, whose
+closure error is a real consistency check. `fragment-swap` is the simple alternative: one
+hybrid per differing position, no search.
+
+Everything a generator proposes is judged by the machinery that judges every other edge.
+The molecule is posed against its parents, and its `A~M` and `M~B` sub-edges go through the
+same mapper, scorer, and soft-core policy — a badly posed intermediate comes back as an
+ordinary `core_geometry_mismatch` and the whole proposal is dropped, molecules included, so
+there are never orphan synthetic vertices.
+
+An invented ligand is a molecule nobody has seen and nobody has parameterised, and the
+outputs say so. The Amber export writes `ligands/<name>.sdf` for every ligand plus an
+`intermediates.txt` manifest of `<name> <parent> <parent> <generator>`, so every name in
+`edges.dat` has a structure beside it; `--validate-exporter amber` warns about the count
+before the mapping run. The HTML report draws them with a dashed outline and a `SYN` badge,
+counts them separately from the real ligands, and lists each one's parents, generator and
+pose RMSD. `network.intermediates` records every gap attempted, bridged or not.
+
 ## Python API
 
 ```python
@@ -196,11 +304,13 @@ Exporters adapt a planned network to a downstream consumer without that consumer
 concerns reaching back into the core:
 
 - `amber` — `edges.dat` plus one `atommap_<src>~<dst>.runconfig` per edge, in the layout
-  `amberstudio`'s `BuildEdges` produces and `guimapper` edits.
+  `amberstudio`'s `BuildEdges` produces and `guimapper` edits, plus `ligands/<name>.sdf` for
+  every ligand so no name in `edges.dat` lacks a structure, and `intermediates.txt` when any
+  were invented.
 - `json` — the round-trippable native format, including rejected candidates.
 - `edgelist`, `graphml`, `html` (a self-contained report with depictions).
 
-Adding your own is a `PluginSpec` plus a class implementing one of the four ABCs in
+Adding your own is a `PluginSpec` plus a class implementing one of the five ABCs in
 `rbfenetmap.core.meta`. Registration is metadata only — nothing is imported until the
 plugin is actually used, which is why `rbfenet plugins --all` can report on backends that
 are not installed.

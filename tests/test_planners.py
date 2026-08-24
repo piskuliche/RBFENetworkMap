@@ -7,6 +7,7 @@ something a reader can verify by adding up four numbers.
 
 from __future__ import annotations
 
+import networkx as nx
 import pytest
 
 from rbfenetmap.core.exceptions import NetworkPlanError
@@ -371,3 +372,248 @@ class TestSimplePlanners:
                 candidates,
                 NetworkOptions(pair_strategy="explicit", explicit_pairs=("bza_H~bza_F",), require_connected=False),
             )
+
+
+def _graph_of(network) -> nx.Graph:
+    """The selected edges as a plain graph, for shape assertions."""
+    graph: nx.Graph = nx.Graph()
+    graph.add_nodes_from(network.ligands)
+    graph.add_edges_from(edge.unordered_key for edge in network.edges)
+    return graph
+
+
+@pytest.fixture
+def path_ligands(benzamides) -> dict[str, Ligand]:
+    """Six ligands. Real molecules only so that Network validation is satisfied."""
+    names = ("bza_H", "bza_F", "bza_Cl", "bza_Me", "bza_CF3")
+    ligands = {name: benzamides[name] for name in names}
+    ligands["bza_extra"] = benzamides["bza_H"]
+    return ligands
+
+
+@pytest.fixture
+def path_order() -> tuple[str, ...]:
+    """The order the cheap edges lay the six ligands out in."""
+    return ("bza_H", "bza_F", "bza_Cl", "bza_Me", "bza_CF3", "bza_extra")
+
+
+@pytest.fixture
+def path_candidates(path_order):
+    """A cheap path plus expensive shortcuts, so the spanning tree is the path itself.
+
+    The MST is therefore a line of five edges with diameter 5, which is the shape a
+    diameter bound exists to fix.
+    """
+    candidates = []
+    for i, a in enumerate(path_order):
+        for b in path_order[i + 1 :]:
+            gap = path_order.index(b) - i
+            candidates.append(make_transformation(a, b, cost=1.0 if gap == 1 else 10.0 + gap))
+    return candidates
+
+
+class TestDiameterBound:
+    """``max_diameter`` as an additive third redundancy pass."""
+
+    def _plan(self, ligands, candidates, **kwargs):
+        options = NetworkOptions(edges_per_ligand=1, min_cycle_coverage=0.0, **kwargs)
+        return create_planner("mst").plan(ligands, candidates, options)
+
+    def test_unset_leaves_the_long_path_alone(self, path_ligands, path_candidates):
+        network = self._plan(path_ligands, path_candidates)
+        assert nx.diameter(_graph_of(network)) == 5
+        assert len(network.edges) == 5
+
+    def test_a_bound_buys_exactly_the_shortcuts_it_needs(self, path_ligands, path_candidates):
+        network = self._plan(path_ligands, path_candidates, max_diameter=3)
+        assert nx.diameter(_graph_of(network)) <= 3
+        assert len(network.edges) == 6  # the five path edges plus one shortcut
+        assert network.unmet_constraints == ()
+
+    def test_an_impossible_bound_warns_and_is_recorded(self, path_ligands, path_order):
+        """Only the path edges exist, so nothing can shorten it. Best-effort, never a raise."""
+        only_the_path = [make_transformation(a, b, cost=1.0) for a, b in zip(path_order, path_order[1:])]
+        with pytest.warns(UserWarning, match="max_diameter=2 unmet"):
+            network = self._plan(path_ligands, only_the_path, max_diameter=2)
+        assert any("max_diameter=2 unmet" in c for c in network.unmet_constraints)
+        assert len(network.edges) == 5
+
+    def test_a_disconnected_network_reports_that_instead_of_a_diameter(self, path_ligands, path_order):
+        """Diameter is undefined across components; saying "unmet" would name the wrong knob."""
+        halves = [make_transformation(a, b, cost=1.0) for a, b in (path_order[:2], path_order[2:4], path_order[4:6])]
+        options = NetworkOptions(edges_per_ligand=1, min_cycle_coverage=0.0, max_diameter=2, require_connected=False)
+        network = create_planner("mst").plan(path_ligands, halves, options)
+        assert any("diameter is undefined" in c for c in network.unmet_constraints)
+
+    def test_the_edge_budget_still_caps_the_pass(self, path_ligands, path_candidates):
+        network = self._plan(path_ligands, path_candidates, max_diameter=2, n_edges=5)
+        assert len(network.edges) == 5
+
+    @pytest.fixture
+    def spider(self, benzamides):
+        """A hub with four two-hop arms: cheap ``hub-p`` and ``p-leaf``, everything else dear.
+
+        The shape the path-graph cases above cannot express, and the shape a real congeneric
+        series actually has -- the shipped nine-ligand example is a degree-six hub with
+        pendant pairs hanging off it.
+
+        Its diameter is a maximum over *six* equally-long leaf-to-leaf pairs, so no single
+        shortcut lowers it: relieve one pair and five are still four hops apart. Four
+        ``hub-leaf`` edges lower it to two. A greedy that requires each edge to reduce the
+        maximum sees a plateau and stops; one that counts offending pairs walks down it.
+        """
+        from dataclasses import replace
+
+        source = benzamides["bza_H"]
+        names = [f"lig_{i}" for i in range(9)]
+        ligands = {name: replace(source, name=name) for name in names}
+
+        hub, rest = names[0], names[1:]
+        arms = [(rest[i], rest[i + 1]) for i in range(0, 8, 2)]
+        candidates = [make_transformation(hub, near, cost=1.0) for near, _ in arms]
+        candidates += [make_transformation(near, leaf, cost=1.0) for near, leaf in arms]
+        cheap = {c.unordered_key for c in candidates}
+        for i, a in enumerate(names):
+            for b in names[i + 1 :]:
+                if tuple(sorted((a, b))) not in cheap:
+                    candidates.append(make_transformation(a, b, cost=50.0))
+        return ligands, candidates
+
+    def test_a_plateau_the_maximum_hides_is_still_descended(self, spider):
+        """The regression: the bound is reachable, and no single edge gets closer to it.
+
+        Before this pass descended on the far-pair count, it asked each candidate to reduce
+        the *diameter*, found none that did, and reported that the pool had nothing left to
+        sell -- while the pool in fact held the edges that meet the bound. A knob that
+        reports an unreachable target on a reachable one is precisely the failure mode this
+        epic exists to remove, so it is pinned here rather than left to a fixture that
+        happens not to provoke it.
+        """
+        ligands, candidates = spider
+        before = self._plan(ligands, candidates)
+        graph = _graph_of(before)
+        assert nx.diameter(graph) > 2
+
+        selected = {tuple(sorted(e)) for e in graph.edges}
+        every = {c.unordered_key for c in candidates}
+        assert not any(
+            nx.diameter(nx.Graph(list(selected | {pair}))) < nx.diameter(graph) for pair in every - selected
+        ), "fixture no longer poses the plateau this test exists for"
+
+        after = self._plan(ligands, candidates, max_diameter=2)
+        assert nx.diameter(_graph_of(after)) <= 2
+        assert after.unmet_constraints == ()
+
+
+class TestCycleCoverageMode:
+    """``node`` counts ligands on a cycle; ``edge`` counts edges, i.e. 2-edge-connectivity."""
+
+    @pytest.fixture
+    def two_triangles(self, path_ligands, path_order):
+        """Two cheap triangles joined by one cheap-ish edge, everything else dear.
+
+        The node rule is satisfied by this shape -- every ligand is on a cycle -- while the
+        joining edge is a bridge that nothing checks. That gap is the whole reason the edge
+        mode exists.
+        """
+        left, right = path_order[:3], path_order[3:]
+        cheap = {
+            tuple(sorted((a, b))): 1.0 for group in (left, right) for i, a in enumerate(group) for b in group[i + 1 :]
+        }
+        cheap[tuple(sorted((left[2], right[0])))] = 2.0
+        candidates = []
+        for i, a in enumerate(path_order):
+            for b in path_order[i + 1 :]:
+                key = tuple(sorted((a, b)))
+                candidates.append(make_transformation(a, b, cost=cheap.get(key, 20.0)))
+        return candidates
+
+    def test_node_mode_is_satisfied_while_a_bridge_remains(self, path_ligands, two_triangles):
+        network = create_planner("mst").plan(path_ligands, two_triangles, NetworkOptions())
+        graph = _graph_of(network)
+        assert list(nx.bridges(graph))  # the joining edge is checked by nothing
+        assert network.unmet_constraints == ()
+
+    def test_edge_mode_leaves_no_bridges_at_full_coverage(self, path_ligands, two_triangles):
+        network = create_planner("mst").plan(path_ligands, two_triangles, NetworkOptions(cycle_coverage_mode="edge"))
+        assert list(nx.bridges(_graph_of(network))) == []
+        assert network.unmet_constraints == ()
+
+    def test_edge_mode_is_the_stricter_target(self, path_ligands, two_triangles):
+        node = create_planner("mst").plan(path_ligands, two_triangles, NetworkOptions())
+        edge = create_planner("mst").plan(path_ligands, two_triangles, NetworkOptions(cycle_coverage_mode="edge"))
+        assert len(edge.edges) > len(node.edges)
+
+    def test_the_default_is_the_node_rule(self):
+        assert NetworkOptions().cycle_coverage_mode == "node"
+
+    def test_an_unknown_mode_is_refused(self):
+        with pytest.raises(ValueError, match="cycle_coverage_mode"):
+            NetworkOptions(cycle_coverage_mode="ligand")  # type: ignore[arg-type]
+
+
+class TestRedundantMSTPlanner:
+    """``n_redundancy`` overlaid trees, per Konnektor."""
+
+    def test_one_tree_reproduces_the_plain_mst(self, square_ligands, square_candidates):
+        options = NetworkOptions(n_redundancy=1, edges_per_ligand=1, min_cycle_coverage=0.0)
+        plain = create_planner("mst").plan(square_ligands, square_candidates, options)
+        overlaid = create_planner("redundant-mst").plan(square_ligands, square_candidates, options)
+        assert {e.unordered_key for e in overlaid.edges} == {e.unordered_key for e in plain.edges}
+
+    def test_two_trees_add_a_second_independent_spanning_structure(self, square_ligands, square_candidates):
+        options = NetworkOptions(n_redundancy=2, edges_per_ligand=1, min_cycle_coverage=0.0)
+        plain = create_planner("mst").plan(square_ligands, square_candidates, options)
+        overlaid = create_planner("redundant-mst").plan(square_ligands, square_candidates, options)
+        first = {e.unordered_key for e in plain.edges}
+        both = {e.unordered_key for e in overlaid.edges}
+        assert first < both
+        # Removing the first tree entirely still leaves every ligand attached.
+        remainder: nx.Graph = nx.Graph()
+        remainder.add_nodes_from(square_ligands)
+        remainder.add_edges_from(both - first)
+        assert min(dict(remainder.degree()).values()) >= 1
+
+    def test_asking_for_more_trees_than_the_pool_holds_is_not_an_error(self, square_ligands, square_candidates):
+        options = NetworkOptions(n_redundancy=9, edges_per_ligand=1, min_cycle_coverage=0.0)
+        network = create_planner("redundant-mst").plan(square_ligands, square_candidates, options)
+        assert len(network.edges) == len(square_candidates)
+
+    def test_it_supports_cbfe(self):
+        assert create_planner("redundant-mst").supports_cbfe is True
+
+    def test_zero_trees_is_refused(self):
+        with pytest.raises(ValueError, match="n_redundancy"):
+            NetworkOptions(n_redundancy=0)
+
+
+class TestHubSelection:
+    """Hub choice is, by OpenEye's own account, the dominant factor in a star map."""
+
+    @pytest.fixture
+    def lopsided(self, square_ligands):
+        """bza_H reaches everything at cost 5; bza_Cl reaches two ligands far more cheaply."""
+        costs = {("bza_H", "bza_F"): 5.0, ("bza_H", "bza_Cl"): 5.0, ("bza_H", "bza_Me"): 5.0, ("bza_Cl", "bza_F"): 0.1}
+        return [make_transformation(a, b, cost=cost) for (a, b), cost in costs.items()]
+
+    def test_the_default_prefers_the_ligand_with_the_most_partners(self, square_ligands, lopsided):
+        network = create_planner("star").plan(square_ligands, lopsided, NetworkOptions())
+        assert {e.unordered_key for e in network.edges} == {
+            ("bza_F", "bza_H"),
+            ("bza_Cl", "bza_H"),
+            ("bza_H", "bza_Me"),
+        }
+
+    def test_min_total_cost_prefers_the_cheapest_reachable_hub(self, square_ligands, lopsided):
+        options = NetworkOptions(hub_selection="min_total_cost", require_connected=False)
+        network = create_planner("star").plan(square_ligands, lopsided, options)
+        assert {e.unordered_key for e in network.edges} == {("bza_Cl", "bza_F"), ("bza_Cl", "bza_H")}
+
+    def test_an_explicit_hub_still_wins_over_either_rule(self, square_ligands, lopsided):
+        options = NetworkOptions(hub="bza_H", hub_selection="min_total_cost")
+        network = create_planner("star").plan(square_ligands, lopsided, options)
+        assert all("bza_H" in edge.unordered_key for edge in network.edges)
+
+    def test_an_unknown_rule_is_refused(self):
+        with pytest.raises(ValueError, match="hub_selection"):
+            NetworkOptions(hub_selection="most_central")  # type: ignore[arg-type]

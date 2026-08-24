@@ -1,0 +1,98 @@
+{
+  "connected": true,
+  "cycle_coverage": 1.0,
+  "cycle_covered": [
+    "bza_CF3",
+    "bza_Cl",
+    "bza_Et",
+    "bza_F",
+    "bza_H",
+    "bza_Me",
+    "bza_OMe",
+    "bza_Ph",
+    "bza_cPr"
+  ],
+  "degree_sequence": [
+    6,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2
+  ],
+  "diameter": 3,
+  "edges": [
+    {
+      "cost": 0.924124271,
+      "key": "bza_H~bza_CF3",
+      "kind": "rbfe"
+    },
+    {
+      "cost": 1.161854461,
+      "key": "bza_CF3~bza_OMe",
+      "kind": "rbfe"
+    },
+    {
+      "cost": 0.395742177,
+      "key": "bza_F~bza_Cl",
+      "kind": "rbfe"
+    },
+    {
+      "cost": 0.310419728,
+      "key": "bza_H~bza_Cl",
+      "kind": "rbfe"
+    },
+    {
+      "cost": 0.469688185,
+      "key": "bza_Me~bza_Et",
+      "kind": "rbfe"
+    },
+    {
+      "cost": 3.001297418,
+      "key": "bza_Et~bza_Ph",
+      "kind": "rbfe"
+    },
+    {
+      "cost": 0.240382886,
+      "key": "bza_H~bza_F",
+      "kind": "rbfe"
+    },
+    {
+      "cost": 0.305356668,
+      "key": "bza_H~bza_Me",
+      "kind": "rbfe"
+    },
+    {
+      "cost": 0.512574484,
+      "key": "bza_H~bza_OMe",
+      "kind": "rbfe"
+    },
+    {
+      "cost": 2.312088626,
+      "key": "bza_H~bza_cPr",
+      "kind": "rbfe"
+    },
+    {
+      "cost": 2.408212326,
+      "key": "bza_cPr~bza_Ph",
+      "kind": "rbfe"
+    }
+  ],
+  "ligands": [
+    "bza_CF3",
+    "bza_Cl",
+    "bza_Et",
+    "bza_F",
+    "bza_H",
+    "bza_Me",
+    "bza_OMe",
+    "bza_Ph",
+    "bza_cPr"
+  ],
+  "n_edges": 11,
+  "planner": "mst",
+  "unmet_constraints": []
+}

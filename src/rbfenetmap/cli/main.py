@@ -18,10 +18,13 @@ from typing import Sequence
 from rbfenetmap import __version__
 from rbfenetmap.cli import commands
 from rbfenetmap.cli._args import (
+    add_cost_units_argument,
     add_ligand_arguments,
     add_mapping_arguments,
     add_network_arguments,
     add_softcore_arguments,
+    explicit_dests,
+    resolve_compat,
 )
 from rbfenetmap.core.exceptions import RBFENetworkMapError
 
@@ -56,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_network_arguments(plan)
     plan.add_argument("--out", type=Path, default=Path("network.json"), help="Network JSON output path.")
     plan.add_argument("--show-rejected", action="store_true", help="List rejected candidates and why.")
+    add_cost_units_argument(plan)
     plan.add_argument("--export", nargs="+", metavar="NAME", help="Also run these exporters.")
     plan.add_argument("--export-dir", type=Path, default=Path("."), help="Directory for exports.")
     plan.add_argument("--exporter-opt", action="append", metavar="K=V", help="Exporter option, repeatable.")
@@ -94,6 +98,51 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--dest", type=Path, default=Path("."), help="Output directory.")
     export.add_argument("--exporter-opt", action="append", metavar="K=V", help="Exporter option, repeatable.")
 
+    # replan -------------------------------------------------------------------
+    # No ligand, mapping, or soft-core flags: replanning maps nothing. It selects a new
+    # network from the candidate pool the original run already scored and stored, which is
+    # what makes it cheap enough to run after every analysis.
+    replan = subparsers.add_parser("replan", help="Prune high-LMI edges from a planned network and replan the gaps.")
+    replan.add_argument("--network", type=Path, required=True, help="Network JSON from `rbfenet plan`.")
+    replan.add_argument(
+        "--lmi",
+        type=Path,
+        required=True,
+        help=(
+            "JSON mapping 'lig_a~lig_b' to a Lagrange Multiplier Index, as produced from an "
+            "edgembar network analysis. See the replanning guide for the format; this is the "
+            "package's own small schema, not edgembar's on-disk output."
+        ),
+    )
+    cut = replan.add_mutually_exclusive_group()
+    cut.add_argument("--lmi-threshold", type=float, metavar="F", help="Prune edges with an LMI strictly above F.")
+    cut.add_argument(
+        "--lmi-quantile",
+        type=float,
+        default=0.9,
+        metavar="Q",
+        help="Prune edges above this quantile of the observed LMIs (default: %(default)s).",
+    )
+    replan.add_argument(
+        "--max-pruned", type=int, metavar="N", help="Prune at most the N worst edges, whatever the cut selects."
+    )
+    replan.add_argument(
+        "--allow-missing-lmi",
+        action="store_true",
+        help="Treat a selected edge with no LMI value as beyond reproach instead of failing.",
+    )
+    replan.add_argument(
+        "--reselect",
+        action="store_true",
+        help=(
+            "Re-select the whole network over the pruned pool instead of holding the surviving "
+            "edges in place. Right before anything has been submitted; after that it can move "
+            "edges that are already set up or running."
+        ),
+    )
+    replan.add_argument("--planner", default="mst", help="Planner used for the replan (default: %(default)s).")
+    replan.add_argument("--out", type=Path, default=Path("replanned.json"), help="Replanned network JSON path.")
+
     # report -------------------------------------------------------------------
     report = subparsers.add_parser("report", help="Render a self-contained HTML report.")
     report.add_argument("--network", type=Path, required=True, help="Network JSON from `rbfenet plan`.")
@@ -101,9 +150,39 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--title", default="RBFE network", help="Report title.")
     report.add_argument("--show-indices", action="store_true", help="Label atoms with their indices.")
 
+    # diagnose -----------------------------------------------------------------
+    diagnose = subparsers.add_parser("diagnose", help="Report network-level metrics for a planned network.")
+    diagnose.add_argument("--network", type=Path, required=True, help="Network JSON from `rbfenet plan`.")
+    diagnose.add_argument(
+        "--failure-rate",
+        type=float,
+        default=0.05,
+        metavar="P",
+        help="Per-edge failure probability used by the robustness estimate (default: %(default)s).",
+    )
+    diagnose.add_argument(
+        "--repeats", type=int, default=100, metavar="N", help="Monte-Carlo trials (default: %(default)s)."
+    )
+    diagnose.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Seed for the robustness estimate (default: %(default)s). The same seed always gives the same number.",
+    )
+    diagnose.add_argument(
+        "--max-cycle-length",
+        type=int,
+        default=4,
+        metavar="N",
+        help="Longest cycle counted (default: %(default)s). Short cycles are the ones that localise an error.",
+    )
+    add_cost_units_argument(diagnose)
+    diagnose.add_argument("--format", choices=("table", "json"), default="table")
+
     # plugins ------------------------------------------------------------------
     plugins = subparsers.add_parser("plugins", help="List plugins and their availability.")
-    plugins.add_argument("--kind", choices=("mapper", "scorer", "planner", "exporter"))
+    plugins.add_argument("--kind", choices=("mapper", "scorer", "planner", "exporter", "intermediate"))
     plugins.add_argument("--all", action="store_true", help="Include plugins whose backends are missing.")
 
     # inspect ------------------------------------------------------------------
@@ -123,9 +202,11 @@ _HANDLERS = {
     "score": commands.cmd_score,
     "map": commands.cmd_map,
     "export": commands.cmd_export,
+    "replan": commands.cmd_replan,
     "report": commands.cmd_report,
     "plugins": commands.cmd_plugins,
     "inspect": commands.cmd_inspect,
+    "diagnose": commands.cmd_diagnose,
 }
 
 
@@ -146,6 +227,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # Which flags the user actually typed, which the parsed values cannot tell us once a
+    # release moves a default. build_parser() is called a second time deliberately:
+    # explicit_dests suppresses the defaults of whatever it is handed, so it must not be
+    # handed the parser above.
+    try:
+        resolve_compat(args, explicit_dests(build_parser(), argv))
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
     level = logging.WARNING - 10 * min(args.verbose, 2)
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")

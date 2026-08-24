@@ -18,7 +18,9 @@ import pytest
 from rdkit import Chem
 from rdkit.Chem import AllChem, rdMolTransforms
 
+from rbfenetmap.core.intermediates import IntermediateProposal
 from rbfenetmap.core.meta.exporters import AbstractExporter
+from rbfenetmap.core.meta.intermediates import AbstractIntermediateGenerator
 from rbfenetmap.core.meta.mappers import AbstractMapper
 from rbfenetmap.core.meta.planners import AbstractNetworkPlanner
 from rbfenetmap.core.meta.scorers import AbstractScorer
@@ -93,6 +95,33 @@ class DummyPlanner(AbstractNetworkPlanner):
             candidates=tuple(candidates),
             planner=self.name,
             options=options,
+        )
+
+
+class DummyIntermediateGenerator(AbstractIntermediateGenerator):
+    """Return a caller-supplied proposal verbatim.
+
+    The counterpart of ``DummyMapper(contract=...)``: everything downstream of the
+    generator boundary -- posing, naming, the record on the network -- can be driven into
+    a chosen state without asking a real generator for a molecule that happens to produce
+    it. Handed no proposal, it rejects, which is what a generator with nothing to say
+    does.
+    """
+
+    name: ClassVar[str] = "dummy"
+
+    def __init__(self, proposal: IntermediateProposal | None = None, *, rejection: str = "dummy_declined") -> None:
+        """Store the proposal to hand back, or the rejection to report instead."""
+        self._proposal = proposal
+        self._rejection = rejection
+
+    def propose(self, source, target, options, mapping_options):
+        """Return the stored proposal, or an empty one carrying the stored rejection."""
+        del options, mapping_options
+        if self._proposal is not None:
+            return self._proposal
+        return IntermediateProposal(
+            source=source.name, target=target.name, generator=self.name, rejection=self._rejection
         )
 
 
@@ -190,6 +219,12 @@ def dummy_planner() -> DummyPlanner:
 
 
 @pytest.fixture
+def dummy_intermediate_generator() -> DummyIntermediateGenerator:
+    """A generator that declines every pair unless handed a proposal."""
+    return DummyIntermediateGenerator()
+
+
+@pytest.fixture
 def dummy_exporter() -> DummyExporter:
     """An exporter that records its calls."""
     return DummyExporter()
@@ -208,6 +243,18 @@ def benzamides() -> dict[str, Ligand]:
         },
         "c1ccccc1C(=O)N",
     )
+
+
+@pytest.fixture(scope="session")
+def disubstituted() -> dict[str, Ligand]:
+    """A co-posed pair differing at *two* ring positions.
+
+    The benzamides differ at one position each, so no hybrid of any two of them is
+    anything but a parent -- which is exactly what ``FragmentSwapGenerator`` refuses to
+    invent. A pair differing at two positions is the smallest input on which an
+    intermediate genuinely exists.
+    """
+    return make_coposed({"di_FCl": "Fc1ccc(Cl)cc1C(=O)N", "di_ClF": "Clc1ccc(F)cc1C(=O)N"}, "c1ccccc1C(=O)N")
 
 
 @pytest.fixture(scope="session")

@@ -12,9 +12,21 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
-from rbfenetmap.core.options import AlignmentOptions, CorePruningPolicy, MappingOptions, NetworkOptions, SoftcorePolicy
+from rbfenetmap.core.cost import COST_UNITS
+from rbfenetmap.core.intermediates import IntermediateOptions
+from rbfenetmap.core.options import (
+    COMPAT_LEVELS,
+    AlignmentOptions,
+    CorePruningPolicy,
+    MappingOptions,
+    NetworkOptions,
+    SoftcorePolicy,
+)
 
 __all__ = (
+    "COMPAT_CLI_PINS",
+    "add_compat_argument",
+    "add_cost_units_argument",
     "add_ligand_arguments",
     "add_mapping_arguments",
     "add_network_arguments",
@@ -22,8 +34,249 @@ __all__ = (
     "build_alignment_options",
     "build_mapping_options",
     "build_network_options",
+    "explicit_dests",
     "parse_key_values",
+    "resolve_compat",
 )
+
+
+#: What ``--compat LEVEL`` pins, as CLI destination names, per level.
+#:
+#: **These are literal transcriptions of what the named release did, not a view onto the
+#: current defaults.** Deriving them from the parser would be shorter and would defeat the
+#: mechanism entirely: when a later version moves a default, a derived table moves with it
+#: and silently stops reproducing the version it names.
+#:
+#: The pinned surface is the *algorithmic* one -- the knobs whose meaning or default may
+#: change between releases. Deliberately absent are the settings that describe **this run**
+#: rather than **this behaviour**:
+#:
+#: - ligand-specific intent (``hub``, ``forced_edge``, ``banned_edge``, ``explicit_edge``):
+#:   banning an edge is a statement about one ligand set, not about a version;
+#: - input preparation (``ligands``, ``align`` and friends): that is which molecules go in,
+#:   not how they are planned;
+#: - operational knobs (``jobs``, ``progress``, ``out``, ``export``): they cannot change
+#:   which network is produced.
+#:
+#: All three stay usable alongside a compat level, which is what makes it practical rather
+#: than merely principled.
+COMPAT_CLI_PINS: dict[str, dict[str, Any]] = {
+    "v0.4": {
+        # mapping
+        "mapper": "mcss-e2",
+        "match_selection": "fewest_fragments",
+        "mcs_timeout": 60,
+        "distance_threshold": 2.0,
+        "mapper_opt": None,
+        # scoring
+        "scorer": "linear",
+        "weights": None,
+        "weights_file": None,
+        # soft-core feasibility
+        "max_softcore_atoms": 12,
+        "max_softcore_fraction": 0.6,
+        "min_core_atoms": 4,
+        "min_mcs_fraction": 0.35,
+        "core_rmsd_threshold": 2.0,
+        "ring_policy": "ring_system",
+        "charge_change_policy": "penalize",
+        # selection
+        "planner": "mst",
+        "pair_strategy": "all_unordered_pairs",
+        "n_edges": None,
+        "edges_per_ligand": 2,
+        "min_cycle_coverage": 1.0,
+        "allow_disconnected": False,
+        "edge_direction": "fewer_softcore_first",
+        "prefilter": "none",
+        "prefilter_k": 8,
+        "prefilter_min_tanimoto": 0.4,
+        "selection_objective": "uniform_redundancy",
+        # None of these four existed in v0.4.0, so the value that reproduces it is the one
+        # that makes each a no-op rather than whatever the current default happens to be.
+        "cycle_coverage_mode": "node",
+        "max_cycle_size": None,
+        "max_diameter": None,
+        "n_redundancy": 2,
+        "hub_selection": "most_partners",
+        "pair_evaluation": "eager",
+        "adaptive_initial_neighbors": 3,
+        "adaptive_batch_size": 32,
+        "cbfe": "off",
+        "cbfe_base_cost": 8.0,
+        "cbfe_atom_weight": 0.05,
+        # Clustered planning did not exist in v0.4, so what reproduces it is the setting
+        # that makes the whole feature a no-op -- not the current default of any knob
+        # inside it. `cluster_bridges` is pinned alongside it even though `cluster_by`
+        # already neutralises it, because a pin that depends on another pin to be
+        # harmless stops being one the moment the other moves.
+        "cluster_by": "none",
+        "cluster_bridges": 2,
+        # v0.4 could not invent a ligand, so every one of these pins to "do not". They are
+        # pinned rather than omitted because they are algorithmic: leaving them out would
+        # let `--compat v0.4 --intermediates bridge` quietly plan a network v0.4 could not
+        # have produced, which is the exact surprise --compat exists to prevent.
+        "intermediates": "off",
+        "intermediate_generator": "pairmap",
+        "max_intermediates": None,
+        "max_intermediate_gaps": None,
+        "intermediates_per_gap": 4,
+        "intermediate_seed": 0xF00D,
+        "intermediate_pose_attempts": 10,
+        "intermediate_pose_rmsd_factor": 0.5,
+        "intermediate_min_link_score": 0.2,
+        "intermediate_max_dist": 3,
+        "intermediate_max_cycle": 4,
+        "intermediate_max_subgraph_dist": 4,
+        "intermediate_beta": 0.1,
+        "consistency": "pairwise",
+        # statistical design -- v0.4.0 had none, so every one of these pins the no-op
+        "design": "none",
+        "design_candidate_factor": 3.0,
+        "design_refine": False,
+        "design_total_ns": None,
+        "design_lambda_min": 12,
+        "design_lambda_max": 24,
+    }
+}
+
+#: Reverse lookup from destination to the flag that sets it, for error messages. A user
+#: who typed ``--edges-per-ligand`` should be told about ``--edges-per-ligand``, not about
+#: an internal attribute name they have never seen.
+_DEST_TO_FLAG: dict[str, str] = {
+    "mapper_opt": "--mapper-opt",
+    "mcs_timeout": "--mcs-timeout",
+    "cbfe": "--cbfe",
+    "allow_disconnected": "--allow-disconnected",
+    "weights": "--weights",
+    "weights_file": "--weights-file",
+    "intermediates": "--intermediates",
+}
+
+
+def _flag_for(dest: str) -> str:
+    """Return the user-facing flag that sets *dest*."""
+    return _DEST_TO_FLAG.get(dest, "--" + dest.replace("_", "-"))
+
+
+def add_compat_argument(parser: argparse.ArgumentParser) -> None:
+    """Add ``--compat``, which pins every algorithmic knob to a released behaviour."""
+    parser.add_argument(
+        "--compat",
+        choices=COMPAT_LEVELS,
+        metavar="LEVEL",
+        help=(
+            "Reproduce a released version's behaviour exactly, pinning every algorithmic "
+            f"knob to what that version used. Choices: {', '.join(COMPAT_LEVELS)}. Ligand "
+            "intent (--hub, --banned-edge), input preparation (--align) and operational "
+            "flags (--jobs, --progress) stay available; naming an algorithmic knob "
+            "alongside this is a contradiction and is refused."
+        ),
+    )
+
+
+def add_cost_units_argument(parser: argparse.ArgumentParser) -> None:
+    """Add ``--cost-units``, which chooses how a cost *report* is expressed.
+
+    Deliberately absent from :data:`COMPAT_CLI_PINS` and from
+    :class:`~rbfenetmap.core.options.NetworkOptions`. It is a display unit, on the same
+    footing as ``--format`` or ``--show-rejected``: no planner reads it, no edge moves
+    because of it, and pinning it would refuse ``--compat v0.4 --cost-units gpu_hours``, a
+    combination with no contradiction in it at all. Reproducing a released behaviour is a
+    statement about which network comes out, not about what units it is printed in.
+    """
+    parser.add_argument(
+        "--cost-units",
+        choices=COST_UNITS,
+        default="score",
+        help=(
+            "Units for the reported network cost (default: %(default)s). 'score' is the scorer's own "
+            "difficulty scale, which orders edges; 'gpu_hours' is estimated machine time from published "
+            "per-edge measurements, plus a price. Reporting only -- it cannot change which edges are chosen."
+        ),
+    )
+
+
+def explicit_dests(parser: argparse.ArgumentParser, argv: Sequence[str] | None) -> frozenset[str]:
+    """Return the destinations the user actually named on the command line.
+
+    Comparing the parsed value against the current default cannot answer this, and the
+    difference is the whole reason ``--compat`` exists: once a release moves a default, an
+    unnamed flag and a deliberately-set one become indistinguishable that way, and every
+    run would be reported as conflicting with the level it asked for.
+
+    So this re-parses the same argv against a parser whose defaults are all suppressed.
+    Only what the user typed survives, which is exactly the question being asked.
+
+    Parameters
+    ----------
+    parser : argparse.ArgumentParser
+        **A throwaway.** Its defaults are suppressed in place, which leaves it unfit to
+        parse anything else, so callers pass a freshly built one rather than the parser
+        whose result they intend to use.
+    argv : Sequence[str], optional
+        The same argv the real parse saw. ``None`` means ``sys.argv[1:]``.
+    """
+    _suppress_defaults(parser)
+    try:
+        return frozenset(vars(parser.parse_args(list(argv) if argv is not None else None)))
+    except SystemExit:  # pragma: no cover - argparse already reported the usage error
+        return frozenset()
+
+
+def _suppress_defaults(parser: argparse.ArgumentParser) -> None:
+    """Set every default in *parser*, and in any subparser, to ``SUPPRESS``."""
+    for action in parser._actions:  # noqa: SLF001 - argparse exposes no public equivalent
+        if isinstance(action, argparse._SubParsersAction):  # noqa: SLF001
+            for sub in action.choices.values():
+                _suppress_defaults(sub)
+        action.default = argparse.SUPPRESS
+
+
+def resolve_compat(args: argparse.Namespace, explicit: frozenset[str]) -> None:
+    """Apply ``--compat`` to *args* in place, refusing any knob it contradicts.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed arguments. Modified in place.
+    explicit : frozenset[str]
+        Destinations the user named, from :func:`explicit_dests`.
+
+    Raises
+    ------
+    SystemExit
+        Via ``argparse``-style exit, if the user named an algorithmic knob alongside
+        ``--compat``.
+
+    Notes
+    -----
+    Rejecting rather than silently letting one win follows the rule the package already
+    applies to ``n_edges`` against ``require_connected``: both resolutions are defensible,
+    so neither may be chosen on the user's behalf. ``--compat v0.4 --max-diameter 5`` is a
+    request for v0.4's behaviour and for something v0.4 could not do, and only the user can
+    say which they meant.
+    """
+    level = getattr(args, "compat", None)
+    if level is None:
+        return
+
+    pins = COMPAT_CLI_PINS[level]
+    conflicts = sorted(_flag_for(dest) for dest in pins if dest in explicit)
+    if conflicts:
+        raise ValueError(
+            f"--compat {level} pins every algorithmic knob to what {level} used, so it cannot be "
+            f"combined with {', '.join(conflicts)}. Drop --compat to set "
+            f"{'them' if len(conflicts) > 1 else 'it'} explicitly, or drop "
+            f"{'those flags' if len(conflicts) > 1 else 'that flag'} to reproduce {level}. "
+            "Ligand intent (--hub, --forced-edge, --banned-edge), input preparation "
+            "(--align) and operational flags (--jobs, --progress) are not pinned and may be "
+            "combined with --compat freely."
+        )
+
+    for dest, value in pins.items():
+        if hasattr(args, dest):
+            setattr(args, dest, value)
 
 
 def parse_key_values(items: Sequence[str] | None, *, numeric: bool = True) -> dict[str, Any]:
@@ -197,6 +450,7 @@ def add_softcore_arguments(parser: argparse.ArgumentParser) -> None:
 def add_network_arguments(parser: argparse.ArgumentParser) -> None:
     """Add the network-selection flags."""
     group = parser.add_argument_group("network selection")
+    add_compat_argument(group)  # type: ignore[arg-type]
     group.add_argument("--planner", default="mst", help="Planner plugin (default: %(default)s).")
     group.add_argument(
         "--pair-strategy",
@@ -252,10 +506,47 @@ def add_network_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     group.add_argument(
+        "--cycle-coverage-mode",
+        choices=("node", "edge"),
+        default="node",
+        help=(
+            "What --min-cycle-coverage counts (default: %(default)s). 'node' is the fraction of "
+            "ligands lying on a cycle; 'edge' is the fraction of selected edges lying on one, which "
+            "at 1.0 means the network has no bridges at all. 'edge' is the stricter target."
+        ),
+    )
+    group.add_argument(
         "--max-cycle-size",
         type=int,
         metavar="N",
         help="When improving cycle coverage, prefer cycles of at most N ligands.",
+    )
+    group.add_argument(
+        "--max-diameter",
+        type=int,
+        metavar="N",
+        help=(
+            "Target upper bound on the longest shortest path between two ligands, in edges. "
+            "Statistical error accumulates along a path; LOMAP caps this at 6 and FEP+ below 5. "
+            "Best-effort: a pool with no shortcut left to sell reports the shortfall rather than failing."
+        ),
+    )
+    group.add_argument(
+        "--n-redundancy",
+        type=int,
+        default=2,
+        metavar="N",
+        help="Spanning trees overlaid by the 'redundant-mst' planner (default: %(default)s). Ignored by others.",
+    )
+    group.add_argument(
+        "--hub-selection",
+        choices=("most_partners", "min_total_cost"),
+        default="most_partners",
+        help=(
+            "How the 'star' planner picks a hub when --hub is not given (default: %(default)s). "
+            "'most_partners' ranks by feasible partner count, breaking ties on cost; 'min_total_cost' "
+            "ranks by summed cost, which is LOMAP's rule."
+        ),
     )
     group.add_argument(
         "--pair-evaluation",
@@ -306,6 +597,195 @@ def add_network_arguments(parser: argparse.ArgumentParser) -> None:
         help="Added to the CBFE base cost per heavy atom, summed over both ligands (default: %(default)s).",
     )
     group.add_argument(
+        "--cluster-by",
+        choices=("none", "charge", "scaffold", "fingerprint"),
+        default="none",
+        help=(
+            "Partition the ligands and plan each cluster as its own subnetwork, joined by a few "
+            "chosen edges (default: %(default)s). The precision floor of a network goes as n ln n, "
+            "which is superlinear, so planning d clusters to the floor costs strictly less than "
+            "planning the whole set to it -- roughly 190 edges rather than 460 for 100 ligands in "
+            "five clusters. 'charge' groups on net formal charge, 'scaffold' on the Bemis-Murcko "
+            "framework, 'fingerprint' by average-linkage clustering on Tanimoto distance."
+        ),
+    )
+    group.add_argument(
+        "--cluster-bridges",
+        type=int,
+        default=2,
+        metavar="N",
+        help=(
+            "Edges spent joining each pair of clusters, when --cluster-by is set (default: "
+            "%(default)s). Two puts the crossing itself on a cycle, which applies the "
+            "every-edge-in-a-cycle invariant to the least similar and least trustworthy edges in "
+            "the network; one gives the minimal join and leaves each crossing unchecked."
+        ),
+    )
+    group.add_argument(
+        "--design",
+        choices=("none", "a_optimal", "d_optimal"),
+        default="none",
+        help=(
+            "Statistical design criterion for the 'optimal' planner (default: %(default)s). "
+            "'a_optimal' minimises the total variance of the estimates; 'd_optimal' minimises the "
+            "volume of their joint confidence ellipsoid and yields a markedly more cyclic network at "
+            "the same edge count -- prefer it when a cycle-closure correction will be applied "
+            "downstream. Requires --planner optimal; naming it with any other planner is refused "
+            "rather than ignored."
+        ),
+    )
+    group.add_argument(
+        "--design-candidate-factor",
+        type=float,
+        default=3.0,
+        metavar="F",
+        help="Cap the design's candidate pool at F x the ligand count (default: %(default)s).",
+    )
+    group.add_argument(
+        "--design-refine",
+        action="store_true",
+        help=(
+            "Refine the design with a Fedorov exchange pass. Off by default: the heuristic is already "
+            "within a published 1.10x of the optimum, and this costs far more criterion evaluations."
+        ),
+    )
+    group.add_argument(
+        "--design-total-ns",
+        type=float,
+        metavar="NS",
+        help=(
+            "Total simulation budget, in nanoseconds, distributed A-optimally across the selected "
+            "edges and written into each Amber .runconfig as a lambda-window and nanosecond budget. "
+            "Static: computed from predicted variances, never refitted against measured ones."
+        ),
+    )
+    group.add_argument(
+        "--design-lambda-min",
+        type=int,
+        default=12,
+        metavar="N",
+        help="Fewest lambda windows the allocation may assign to an edge (default: %(default)s).",
+    )
+    group.add_argument(
+        "--design-lambda-max",
+        type=int,
+        default=24,
+        metavar="N",
+        help="Most lambda windows the allocation may assign to an edge (default: %(default)s).",
+    )
+    group.add_argument(
+        "--intermediates",
+        choices=("off", "bridge", "gaps"),
+        default="off",
+        help=(
+            "Invent bridging ligands for pairs no mapping can relate: 'bridge' only for pairs whose "
+            "endpoints fall in different components of the feasible pool, 'gaps' also for infeasible "
+            "pairs inside a component. The invented molecules are posed against their parents and their "
+            "sub-edges go through the same feasibility checks as any other edge; a proposal whose "
+            "sub-edges do not survive is dropped whole. Default: %(default)s."
+        ),
+    )
+    group.add_argument(
+        "--intermediate-generator",
+        default="pairmap",
+        metavar="NAME",
+        help="Intermediate generator plugin (default: %(default)s). Constructed only when --intermediates is on.",
+    )
+    group.add_argument(
+        "--max-intermediates",
+        type=int,
+        metavar="N",
+        help="Cap on how many ligands one run may invent in total (default: no cap beyond the edge budget).",
+    )
+    group.add_argument(
+        "--max-intermediate-gaps",
+        type=int,
+        metavar="N",
+        help="Offer at most N gaps to the generator, most similar first (default: every gap).",
+    )
+    group.add_argument(
+        "--intermediates-per-gap",
+        type=int,
+        default=4,
+        metavar="N",
+        help="Cap on molecules proposed for one gap (default: %(default)s).",
+    )
+    group.add_argument(
+        "--intermediate-seed",
+        type=int,
+        default=0xF00D,
+        metavar="SEED",
+        help="Base RDKit seed for posing invented molecules (default: %(default)s).",
+    )
+    group.add_argument(
+        "--intermediate-pose-attempts",
+        type=int,
+        default=10,
+        metavar="N",
+        help="Embedding attempts spent posing one invented molecule (default: %(default)s).",
+    )
+    group.add_argument(
+        "--intermediate-pose-rmsd-factor",
+        type=float,
+        default=0.5,
+        metavar="F",
+        help=(
+            "Accept an invented pose only below F * --core-rmsd-threshold (default: %(default)s). The "
+            "sub-edges are gated on the full threshold anyway; this refuses a pose that would only just "
+            "scrape through."
+        ),
+    )
+    group.add_argument(
+        "--intermediate-min-link-score",
+        type=float,
+        default=0.2,
+        metavar="S",
+        help=(
+            "Lowest link score a generator may consider worth proposing, on a (0, 1] similarity scale "
+            "(default: %(default)s). PairMap's MIN_SCORE."
+        ),
+    )
+    group.add_argument(
+        "--intermediate-max-dist",
+        type=int,
+        default=3,
+        metavar="N",
+        help=(
+            "Longest source-to-target path, in links, a generator may propose (default: %(default)s). "
+            "At least 2: a one-link path is the direct edge that was already rejected. PairMap's MAX_DIST."
+        ),
+    )
+    group.add_argument(
+        "--intermediate-max-cycle",
+        type=int,
+        default=4,
+        metavar="N",
+        help=(
+            "Largest cycle a generator may build to give a proposed link a second, independent route "
+            "(default: %(default)s). PairMap's MAX_CYCLE."
+        ),
+    )
+    group.add_argument(
+        "--intermediate-max-subgraph-dist",
+        type=int,
+        default=4,
+        metavar="N",
+        help=(
+            "How far from either parent, in links, a molecule may sit and still join the proposed "
+            "subnetwork (default: %(default)s). PairMap's MAX_SUBGRAPH_DIST."
+        ),
+    )
+    group.add_argument(
+        "--intermediate-beta",
+        type=float,
+        default=0.1,
+        metavar="B",
+        help=(
+            "Decay rate of the exponential link score, per heavy atom changed (default: %(default)s). "
+            "The same constant LOMAP's similarity uses."
+        ),
+    )
+    group.add_argument(
         "--progress",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -313,9 +793,14 @@ def add_network_arguments(parser: argparse.ArgumentParser) -> None:
     )
     group.add_argument(
         "--consistency",
-        choices=("pairwise", "graph"),
+        choices=("pairwise", "component", "graph"),
         default="pairwise",
-        help="'graph' intersects each ligand's core across all its edges (default: %(default)s).",
+        help=(
+            "Require each ligand to hold one common core -- and so one soft-core, and one Amber "
+            "scmask -- across its RBFE edges. 'component' asks for it within each connected "
+            "component of the RBFE network, 'graph' across the whole of it. CBFE edges are exempt "
+            "either way. Default: %(default)s."
+        ),
     )
     group.add_argument(
         "--jobs",
@@ -363,6 +848,21 @@ def build_network_options(args: argparse.Namespace) -> NetworkOptions:
         core_rmsd_threshold=args.core_rmsd_threshold,
         charge_change_policy=args.charge_change_policy,
     )
+    intermediates = IntermediateOptions(
+        mode=args.intermediates,
+        generator=args.intermediate_generator,
+        max_intermediates=args.max_intermediates,
+        max_gaps=args.max_intermediate_gaps,
+        max_molecules=args.intermediates_per_gap,
+        seed=args.intermediate_seed,
+        max_pose_attempts=args.intermediate_pose_attempts,
+        pose_rmsd_factor=args.intermediate_pose_rmsd_factor,
+        min_link_score=args.intermediate_min_link_score,
+        max_dist=args.intermediate_max_dist,
+        max_cycle=args.intermediate_max_cycle,
+        max_subgraph_dist=args.intermediate_max_subgraph_dist,
+        beta=args.intermediate_beta,
+    )
     return NetworkOptions(
         pair_strategy=args.pair_strategy,
         hub=args.hub,
@@ -378,7 +878,11 @@ def build_network_options(args: argparse.Namespace) -> NetworkOptions:
         prefilter_k=args.prefilter_k,
         prefilter_min_tanimoto=args.prefilter_min_tanimoto,
         selection_objective=args.selection_objective,
+        cycle_coverage_mode=args.cycle_coverage_mode,
         max_cycle_size=args.max_cycle_size,
+        max_diameter=args.max_diameter,
+        n_redundancy=args.n_redundancy,
+        hub_selection=args.hub_selection,
         pair_evaluation=args.pair_evaluation,
         adaptive_initial_neighbors=args.adaptive_initial_neighbors,
         adaptive_batch_size=args.adaptive_batch_size,
@@ -388,5 +892,15 @@ def build_network_options(args: argparse.Namespace) -> NetworkOptions:
         cbfe_mode=args.cbfe,
         cbfe_base_cost=args.cbfe_base_cost,
         cbfe_atom_weight=args.cbfe_atom_weight,
+        cluster_by=args.cluster_by,
+        cluster_bridges=args.cluster_bridges,
+        design=args.design,
+        design_candidate_factor=args.design_candidate_factor,
+        design_refine=args.design_refine,
+        design_total_ns=args.design_total_ns,
+        design_lambda_min=args.design_lambda_min,
+        design_lambda_max=args.design_lambda_max,
         softcore=softcore,
+        intermediates=intermediates,
+        compat=getattr(args, "compat", None),
     )

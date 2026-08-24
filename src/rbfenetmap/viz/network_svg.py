@@ -153,6 +153,13 @@ def render_network_svg(
 
     Colour is still never the *only* signal. Every counterpoised edge says ``CBFE`` in its
     tooltip, and its card in the report carries a badge.
+
+    A ligand this package *invented* is drawn with a dashed outline and its on-canvas label
+    ends in ``SYN``. Two signals rather than one, and neither of them colour: the node
+    palette is already spent on connected-versus-isolated, and a reader who cannot resolve
+    a 2.5px dash pattern -- in print, on a small screen, in a screenshot -- still reads the
+    three letters. Mistaking an invented vertex for a ligand somebody supplied is the one
+    error in this whole feature that costs a real simulation.
     """
     graph = network.to_networkx()
     # Scale the canvas with the node count instead of fixing it: 48 ligands in the space
@@ -192,6 +199,7 @@ def render_network_svg(
         ".edge-cbfe{stroke:#7c3aed}"
         ".node{fill:#4a90d9;stroke:#22384f;stroke-width:1.5}"
         ".node-isolated{fill:#ffffff;stroke:#c0392b;stroke-width:2}"
+        ".node-synthetic{stroke-dasharray:4 2.5;stroke-width:2.5}"
         ".label{font-size:12px;fill:#1c2733;text-anchor:middle}"
         "</style>",
     ]
@@ -214,19 +222,26 @@ def render_network_svg(
             line = f'<a href="{html.escape(href, quote=True)}" aria-label="{html.escape(source)} to {html.escape(target)}">{line}</a>'
         parts.append(line)
 
-    for node in graph.nodes:
+    for node, data in graph.nodes(data=True):
         x, y = place(node)
         isolated = graph.degree(node) == 0
+        synthetic = bool(data.get("synthetic"))
         css = "node-isolated" if isolated else "node"
+        if synthetic:
+            css += " node-synthetic"
         radius = 9 + min(6, math.sqrt(graph.degree(node)) * 2)
+        note = " (invented by this package)" if synthetic else ""
         parts.append(
             f'<circle class="{css}" cx="{x:.1f}" cy="{y:.1f}" r="{radius:.1f}">'
-            f"<title>{html.escape(node)} (degree {graph.degree(node)})</title></circle>"
+            f"<title>{html.escape(node)} (degree {graph.degree(node)}){note}</title></circle>"
         )
         label = node[len(prefix) :] if prefix and node.startswith(prefix) else node
+        # The badge, not the dash, is what carries the distinction where a reader cannot
+        # resolve a 2.5px stroke pattern -- print, a small screen, a screenshot.
+        suffix = " SYN" if synthetic else ""
         parts.append(
-            f'<text class="label" x="{x:.1f}" y="{y + radius + 14:.1f}">{html.escape(label)}'
-            f"<title>{html.escape(node)}</title></text>"
+            f'<text class="label" x="{x:.1f}" y="{y + radius + 14:.1f}">{html.escape(label)}{suffix}'
+            f"<title>{html.escape(node)}{note}</title></text>"
         )
 
     parts.append("</svg>")

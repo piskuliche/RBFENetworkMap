@@ -25,3 +25,6 @@ unprot_report/
 
 # Machine-local Claude Code settings; .claude/skills/ is shared.
 .claude/settings.local.json
+
+# Agent worktrees (Claude Code isolation); never part of a commit.
+.claude/worktrees/

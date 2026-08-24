@@ -25,6 +25,8 @@ Scorers
 
 .. automodule:: rbfenetmap.plugins.scorers.softcore_size_scorer
 
+.. automodule:: rbfenetmap.plugins.scorers.variance_scorer
+
 Planners
 --------
 
@@ -33,6 +35,8 @@ Planners
 .. automodule:: rbfenetmap.plugins.planners.mst_planner
 
 .. automodule:: rbfenetmap.plugins.planners.simple_planners
+
+.. automodule:: rbfenetmap.plugins.planners.optimal_planner
 
 Exporters
 ---------
@@ -44,3 +48,12 @@ Exporters
 .. automodule:: rbfenetmap.plugins.exporters.amber_exporter
 
 .. automodule:: rbfenetmap.plugins.exporters.html_exporter
+
+Intermediate generators
+-----------------------
+
+.. automodule:: rbfenetmap.plugins.intermediates
+
+.. automodule:: rbfenetmap.plugins.intermediates.fragment_swap
+
+.. automodule:: rbfenetmap.plugins.intermediates.pairmap_generator

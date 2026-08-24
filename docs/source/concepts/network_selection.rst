@@ -6,8 +6,8 @@ guarantee hold.
 
 1. **Minimum spanning tree**, seeded so that forced edges are already in it. This spans
    every ligand whenever the feasible candidate graph is connected.
-2. **A purely additive redundancy pass** that raises degrees and closes cycles without
-   ever removing a tree edge.
+2. **A purely additive redundancy pass** that raises degrees, closes cycles, and -- when
+   ``max_diameter`` is set -- buys shortcuts, without ever removing a tree edge.
 
 Because the second stage only adds, connectivity established in the first cannot be lost.
 
@@ -68,6 +68,181 @@ component of a single edge and its endpoints would be counted as covered when th
 When ``selection_objective="connectivity_then_cycles"``, candidate additions are ranked
 by how many *new* ligands they place on a cycle, then by cycle length, then by cost.
 ``max_cycle_size`` can be used to ignore long loops and prefer triangles or 4-cycles.
+
+What coverage is measured over
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``cycle_coverage_mode`` chooses the *unit* ``min_cycle_coverage`` is a fraction of.
+
+``node`` (default)
+   The fraction of **ligands** on at least one cycle. This is LOMAP's rule and what the
+   package has always measured.
+
+``edge``
+   The fraction of **selected edges** on at least one cycle -- equivalently, the selected
+   edges minus :func:`networkx.bridges`. At coverage 1.0 the network has no bridges at
+   all, which is exactly 2-edge-connectivity. That is FEP+'s stated invariant, and the
+   target Xu, NetBFE, and Konnektor converge on independently.
+
+The edge form is **strictly harder**, which is why it is opt-in rather than a correction
+to the node form. Two triangles joined by a single edge satisfy the node rule completely
+-- every ligand is on a cycle -- while the joining edge is checked by nothing. And it is
+the edge that carries the free energy.
+
+The denominator moves under the edge rule: each edge added is one more edge that must
+itself end up on a cycle. That is the intended reading, so the ratio is recomputed on each
+pass rather than fixed once as the node target is.
+
+Path length
+-----------
+
+Statistical error accumulates along a path, so two ligands comparable only across nine
+hops are worse related than the edge count suggests. LOMAP caps the network diameter at 6
+and FEP+ below 5; ``max_diameter`` is that bound here, and it is unset by default.
+
+Both of those tools enforce their bound during edge **removal**, where the question is
+which edge to keep. Selection here is additive -- the spanning tree is never trimmed, and
+that is what makes the connectivity guarantee hold -- so the bound is approached from the
+other side. A third redundancy pass greedily buys the shortcut that shortens the network
+most per unit of cost, and repeats until the bound is met or the pool runs out.
+
+The diameter is recomputed with ``usebounds=True`` (the FastLomap optimisation,
+`arXiv:2304.04713 <https://arxiv.org/pdf/2304.04713>`_), which replaces the all-pairs
+sweep with a handful of breadth-first searches and is what makes a per-candidate
+re-evaluation affordable past a hundred ligands.
+
+Like ``edges_per_ligand`` and ``min_cycle_coverage``, this is **best-effort**: a pool with
+no shortcut left to sell warns and lands on ``unmet_constraints`` rather than raising. A
+network longer than asked for is still a usable network. If the selected network is
+disconnected the pass says so instead -- the diameter is undefined across components, and
+reporting an unmet bound would send the reader after the wrong knob.
+
+The pass draws from the RBFE-only pool, on the same reasoning that keeps degree raising
+off counterpoised edges: shortening a path that already exists is a refinement, not a
+rescue, and two absolute calculations is not a trade anyone would make for one.
+Core consistency
+----------------
+
+By default every edge is mapped on its own, and holds the largest common core its own pair
+supports -- the cheapest transformation for that pair. A ligand sitting on three edges
+therefore holds three different cores, one per partner, and nothing requires them to agree.
+Whether an atom is "in the core" is a question that can only be answered per edge.
+
+``--consistency`` answers it per *ligand*. After selection, each ligand keeps the
+**intersection** of its cores over its selected RBFE edges; everything else is demoted to
+soft-core and the repair is re-run on what remains. The network then shares one genuine
+common core rather than a merely pairwise-compatible one, which is what a group of ligands
+sharing a scaffold means -- and what a per-cluster Amber setup wants.
+
+One core per ligand *is* one soft-core per ligand
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Worth stating outright, because it is the reason most people want this and it is not
+obvious from the name. A mapping's common core and soft-core are a strict partition of a
+ligand's atoms -- disjoint, and jointly covering every one of them, checked on construction
+in :mod:`rbfenetmap.core.validate`. So pinning a ligand's core across its edges pins its
+soft-core to the exact complement.
+
+If you came here asking "can a ligand be made to have the same soft-core region in all of
+its transformations?", this is that knob. And the practical form of the question is usually
+about Amber: **the** ``scmask`` **is the soft-core**, so a ligand with one core across its
+edges has one ``scmask`` across them too.
+
+Scope: how widely the rule applies
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 16 84
+
+   * - Value
+     - The rule
+   * - ``pairwise``
+     - **Default.** No requirement; each edge holds the largest core its own pair supports.
+   * - ``component``
+     - One core per ligand within each connected component of the RBFE-only selected
+       subgraph. Costs nothing to configure.
+   * - ``graph``
+     - One core per ligand across *all* of its selected RBFE edges. The strongest form, and
+       the one that fails first: the intersection spans the whole network, so a single
+       chemically distant ligand shrinks everyone's core.
+
+An edge whose endpoints fall in different groups is **exempt**, exactly as a counterpoised
+edge is. So a ligand sitting on a boundary edge holds its group-uniform core on its internal
+edges and a different, pairwise one there. Feeding boundary edges into both groups'
+intersections is not the alternative it looks like: the constraint would propagate across
+the join and collapse the scope straight back to ``graph``.
+
+Hydrogens are intersected by count, not by index
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The intersection runs on **heavy atoms**, and hydrogens follow their parents -- the same
+division of labour the MCS search itself uses.
+
+Intersecting hydrogen indices directly is not merely wasteful, it is destructive. Two edges
+out of one ligand routinely put *different* hydrogens of a symmetric group in the core;
+which of a methyl's three got paired is an artefact of the embedding, not chemistry. The
+intersection then drops all of them and keeps the parent -- and a soft-core hydrogen on a
+common-core parent is its own region, because hydrogen-follows-parent is deliberately
+one-way. The repair is then made to bridge regions the intersection invented, and the
+cascade eats the core. On a three-scaffold set that failed every single edge, with the heavy
+core untouched at nine atoms.
+
+Counting asks the question that has a chemical answer -- *how many* hydrogens on this atom
+are shared, not *which* -- and the lowest-indexed that many are kept, which is the same
+choice on every edge and so is uniform by construction.
+
+It runs to a fixed point rather than in one pass. Demoting an atom on one side drops its
+partner on the other, which shrinks that ligand's core, which changes *its* intersection;
+and the repair may demote further atoms still to keep the soft-core in one connected piece.
+Cores only ever shrink, so the iteration is monotone on a finite set and terminates.
+
+On the nine-ligand example series, one edge changes: ``bza_Me~bza_Et`` maps pairwise onto an
+18-atom core -- those two ligands are more like each other than either is like the rest --
+while every other edge on either of them gets 15. Under ``graph`` it drops to 15 too, and
+the edge is re-costed upward to say so.
+
+Two limits, and one failure mode
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**CBFE edges are exempt.** A counterpoised edge has no common core by construction, so
+reading one as "this ligand's core is empty here" would erase the core of every ligand a
+bridge touches -- an artefact of the bridge, not a statement about the scaffold. The
+guarantee is therefore across a ligand's **RBFE** edges; with ``--cbfe off`` (the default)
+that is the same statement, and otherwise it is not.
+
+**The candidate pool is untouched.** Only selected edges are rewritten, so a network file
+written under a consistency scope carries consistent selected edges alongside *pairwise*
+candidates. Anything that re-plans from the candidate pool sees the pairwise cores.
+
+And it can fail: the shared core is an intersection, so it is never larger than any pairwise
+one, and a series whose members do not share enough scaffold cannot sustain it. That raises,
+naming each edge and quoting the repair's own trace -- which is the part worth reading, since
+the core is usually not shrunk to death by the intersection but eaten by the repair that
+follows it.
+
+Two things it deliberately does not do:
+
+- **It does not re-select.** A smaller core makes an edge dearer, and in principle a
+  different network would be optimal under the reduced cores -- but recomputing selection
+  here would mean re-mapping the pool under a constraint that depends on which edges were
+  selected, which is circular. This refines the mappings of the edges that were chosen, and
+  reports the new costs honestly.
+- **It does not absorb a failure.** The shared core is an intersection, so it is never
+  larger than a pairwise one, and it can fall below ``min_core_atoms`` or push the soft-core
+  past its budget. That raises, naming the edges and reasons. These are *selected* edges: a
+  network handed back containing one marked infeasible cannot be run, and quietly reverting
+  the offending edges to their pairwise cores would produce something that is not
+  graph-consistent while claiming to be -- the exact failure this option was reported for
+  when it was still a no-op.
+
+A raise here is also information: it means these ligands do not share a core large enough to
+run on, which is a fact about the series worth knowing.
+
+Counterpoised (CBFE) edges are ignored by the intersection. One has no common core by
+construction, so reading it as "this ligand's core is empty here" would erase the core of
+every ligand a bridge touches -- an artefact of the bridge, not a statement about the
+scaffold.
 
 Counterpoised (CBFE) edges
 --------------------------
@@ -174,6 +349,414 @@ network is two ``BuildEdges`` runs, and the layout mirrors that. Each carries an
 amberstudio builds its masks from the residue roles, since there is no mapping to convey --
 so ``cbfe/`` holds only the edge list. An all-RBFE network keeps the historical flat layout.
 
+Clustered planning
+------------------
+
+``cluster_by`` partitions the ligands and plans each cluster as its own subnetwork, joined
+to the others by a few deliberately chosen edges. It is a knob on the default planner, not a
+planner of its own, because a user who partitions their ligands still wants cycle coverage,
+degree targets and CBFE bridging -- and a separate planner would have to reimplement all
+three to offer any of them.
+
+Why a partition is cheaper
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The precision floor of an RBFE network goes as ``k_min ~ n ln n`` (Pitman *et al.*, *JCIM*
+2023, 63, 1776-1793); below it, precision degrades *worse* as the set grows. That floor is
+superlinear, and superlinear costs are exactly the ones a partition beats::
+
+   sum_i n_i ln n_i  <  n ln n
+
+with equality only for a single cluster. One hundred ligands in five balanced clusters need
+roughly 190 edges rather than 460, a 59% saving at maintained per-cluster precision. Even a
+badly imbalanced split saves 30-50%, because the dominant term is the largest cluster and it
+is still smaller than the whole set.
+
+The clusterers
+~~~~~~~~~~~~~~
+
+``none`` (default)
+   One cluster. Exactly the behaviour described above.
+
+``charge``
+   Net formal charge classes. The one clusterer with no threshold in it -- charge is a
+   property of the molecule rather than of a similarity measure -- and it isolates the
+   transformation the scorer already penalises hardest.
+
+``scaffold``
+   The Bemis-Murcko framework, which is close to what a medicinal chemist means by "series".
+   Acyclic ligands share the empty scaffold rather than each becoming a singleton.
+
+``fingerprint``
+   Average-linkage hierarchical clustering on ``1 - Tanimoto``, cut at a distance of 0.6 --
+   one minus the package's own ``prefilter_min_tanimoto``, so there is a single notion of
+   "similar enough" to reason about. scipy's :func:`~scipy.cluster.hierarchy.linkage` and
+   :func:`~scipy.cluster.hierarchy.fcluster` do the work; scipy is already a dependency and
+   the density methods used elsewhere in the field (HDBSCAN, DBSCAN) would return a noise
+   label this package has no use for, since every ligand must land in a cluster to be
+   planned at all.
+
+Clustering is a **selection-level objective, not a feasibility one.** Nothing here consults
+the soft-core budget, a mapping, or a rejection. A cross-cluster edge is as feasible as it
+ever was; the point is that buying many of them is a worse use of the budget than buying
+edges inside a cluster, because the within-cluster edges are the ones a cycle can check.
+
+Why two bridges
+~~~~~~~~~~~~~~~
+
+``cluster_bridges`` defaults to **2**, and the second one is the whole point. Two edges
+between the same two clusters put the crossing itself on a cycle, since the paths inside
+each cluster close the loop. Cross-cluster edges are the least similar and therefore the
+least trustworthy edges in the network, so applying the every-edge-in-a-cycle invariant
+precisely there buys more per edge than anywhere else. ``cluster_bridges=1`` gives the
+minimal spanning join and leaves each crossing unchecked by anything.
+
+The crossings are chosen by the same maximum-merit sweep the CBFE bridges use --
+:func:`~rbfenetmap.core.cbfe.select_bridges`, with the clusterer's partition passed in
+where the connected components would otherwise go. Connected components are only one
+interesting partition of a ligand set, and joining the groups of any other is the same
+problem with the same ranking.
+
+Where it acts
+~~~~~~~~~~~~~
+
+At one point, before anything is selected: the cross-cluster edges are pruned from the
+candidate graph down to the chosen crossings, and every stage downstream then runs unchanged
+and simply cannot spend on a crossing. The kept crossings are added to the selection
+outright rather than left to the spanning pass, because Kruskal would take one of the two
+and discard the other as redundant -- and "redundant" is exactly what makes the second one
+worth having.
+
+Pruning is an optimisation, and an optimisation that changes the answer would be a bug. If
+a cluster's members reach each other only *through* another cluster, removing the crossings
+would disconnect a network that was connected, so the cheapest necessary crossings are
+restored and the restoration is reported on ``unmet_constraints`` -- the user asked for a
+partition and did not entirely get one, which is a fact about their ligand set worth seeing.
+
+Clustering composes with CBFE rather than competing with it: inter-cluster edges are exactly
+where a counterpoised edge belongs, and a cluster the RBFE pool never connected internally
+is still bridged by ``cbfe_mode``.
+Statistical optimal design
+--------------------------
+
+Everything above selects on **cost**: cheapest spanning tree, then cheap redundancy. That
+answers "what is the cheapest network that connects everything and closes enough cycles?".
+A different question is worth asking -- "which network, at this budget, gives the most
+*precise* free energies?" -- and it has a classical answer.
+
+The fact that makes it tractable: **the Fisher information matrix of a network of relative
+measurements is the weighted graph Laplacian.**
+
+.. math::
+
+   F_{ii} = \sum_{k \ne i} \sigma_{ik}^{-2}, \qquad
+   F_{ij} = -\sigma_{ij}^{-2}, \qquad
+   C = F^{+}
+
+DiffNet, HiMap, Yang's MLE and cinnabar's network analysis are the same object, so one
+implementation (:mod:`rbfenetmap.core.design`) serves selection, sample allocation, and
+analysis.
+
+Two criteria, and when to use which
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``--design a_optimal``
+   Minimise :math:`\operatorname{tr} C`, the summed variance of the estimated free
+   energies. Use this when each ligand's own number is what matters.
+
+``--design d_optimal``
+   Minimise :math:`\ln \det C`, the volume of their joint confidence ellipsoid.
+
+The choice is not arbitrary. The pseudo-determinant of a Laplacian is :math:`n` times its
+weighted spanning-tree count (Kirchhoff), so minimising :math:`\ln \det C` *maximises the
+spanning-tree count* -- and a network with more spanning trees is a network with more
+cycles. Pitman measures 40--80% more cycles at equal edge count, which is why the
+recommendation is: **D-optimal when a cycle-closure correction will be applied downstream,
+A-optimal otherwise.**
+
+Both need a planner that optimises them::
+
+   rbfenet plan --ligands ligands.sdf --scorer variance --planner optimal --design d_optimal
+
+``--design`` under any other planner is **refused, not ignored**. A criterion is an
+objective, and there is nothing a planner can do with one halfway; a flag that silently did
+nothing is the ``--consistency graph`` failure mode this package already has one instance
+of and does not want a second. For the same reason, ``--planner optimal`` without
+``--design`` is refused rather than defaulting to a criterion: the two answer different
+questions and neither is a safe guess.
+
+The cost scale has to mean something
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:math:`F` is built from :math:`1/\sigma^2`, so the scorer's totals have to *be* standard
+deviations rather than a ranking. That is what the ``variance`` scorer supplies -- NetBFE's
+equation 19, a predicted per-edge standard deviation in kcal/mol::
+
+   s_ij = 1.0 + 1.0 * sqrt(max(h_ij, h_ji)) + 0.5 * sqrt(max(H_ij, H_ji))
+
+with *h* the transforming (soft-core) heavy-atom count and *H* the total. The square roots
+are the point: sampling error grows with the square root of the decoupled degrees of
+freedom, so doubling the soft-core does not double the noise. The intercept is the
+irreducible part, and it also keeps :math:`1/\sigma^2` finite.
+
+The design planner runs under any scorer. Under any *other* scorer the numbers it minimises
+are internally consistent but are not variances, and none of the published payoffs apply.
+
+Why the singular matrix is not a problem
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:math:`F` is always singular for an RBFE-only network -- no relative measurement pins the
+absolute offset, so the all-ones vector is in the null space. Restraining the mean
+NetBFE-style, :math:`F^*(\omega) = F + \omega m^{-2} \mathbb{1}\mathbb{1}^T`, and taking
+:math:`\omega \to \infty` through the bordered system converges on the Moore-Penrose
+pseudo-inverse. **The optimal design does not depend on** :math:`\omega`, which is what
+makes the problem well posed: the regulariser fixes the unidentifiable offset and never
+trades against the criterion.
+
+How the edges are chosen
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Choosing the best *k*-subset of :math:`\binom{n}{2}` edges is combinatorial. The planner
+ships Xu's Appendix-H heuristic:
+
+1. the cheapest spanning tree, so connectivity is established before anything competes for
+   the budget;
+2. a candidate pool capped at ``design_candidate_factor * n`` edges (default 3n) -- the tree
+   plus the cheapest remaining candidates;
+3. greedy descent on the criterion within that pool, up to the edge budget.
+
+Published at **1.10 ± 0.03x** of the true optimum. Measured here against exhaustive
+enumeration on small complete graphs, the worst ratio over 40 randomised instances is 1.03x
+(A-optimal) and 1.08x (D-optimal).
+
+``--design-refine`` adds a **Fedorov exchange** pass: repeatedly swap the in-design edge
+whose removal costs least for the candidate whose addition helps most, until no swap
+improves the criterion. It brings the same worst case to 1.005x, at far more criterion
+evaluations. Off by default. It is implemented in numpy rather than through HiMap's route,
+which pins ``rpy2==3.4.5`` and ``scikit-learn==0.23.2`` and requires an R installation.
+
+One deviation from Appendix H is worth knowing about. Its first stage is the cheapest
+**2-edge-connected** spanning subgraph, not a spanning tree. Forcing that costs more than it
+buys: a bridge cover chosen by *cost* spends budget the criterion would rather spend
+elsewhere, and on the same instances it pushes the D-optimal result to 1.33x where letting
+the criterion spend that budget itself stays at 1.08x. The criterion closes the bridges
+worth closing on its own; any that survive are reported on ``unmet_constraints`` rather than
+bought out.
+
+The edge budget
+~~~~~~~~~~~~~~~
+
+With ``n_edges`` unset, the design planner uses Pitman's floor,
+:math:`k_{\min} = \operatorname{round}(n \ln n)`, instead of "as many as redundancy
+wants". Below that bound precision degrades **worse as n grows**, so a design planner that
+ignored it would be optimising inside a budget already known to be too small. At *n* = 40
+that is 148 edges, against the ~40 that ``edges_per_ligand=2`` buys.
+
+This is a property of this planner, not a change to the package default. ``mst`` is
+untouched and ``--compat v0.4`` is unaffected.
+
+``edges_per_ligand`` and ``min_cycle_coverage`` are **not** enforced here. Spending budget
+to hit a degree target would work directly against the objective the user asked for, so a
+shortfall is recorded on ``unmet_constraints`` and left alone.
+
+Per-edge sample allocation
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The same matrix answers a second question: given a fixed simulation budget, how should it be
+split across the selected edges? Model the variance as falling with :math:`1/t`, so an edge
+given :math:`t_e` nanoseconds contributes weight :math:`t_e / \sigma_e^2`. Minimising
+:math:`\operatorname{tr} C` subject to :math:`\sum t_e = T` is convex, and at the optimum
+
+   every edge returns the same variance reduction per nanosecond.
+
+Any other split has an edge worth moving time to. Set ``--design-total-ns`` and the Amber
+exporter writes the result into each per-edge ``.runconfig``, alongside the atom map it
+already carries:
+
+.. code-block:: yaml
+
+   sample_allocation:
+     lambda_windows: 19
+     simulation_ns: 12.4
+     predicted_sigma_kcal: 2.31
+
+The window count is the edge's share mapped onto ``--design-lambda-min`` /
+``--design-lambda-max``. An edge allocated near-zero time is not a bug -- it is the
+allocation reporting that an edge the planner selected turned out redundant given how the
+rest was funded.
+
+This is the **static** first pass. Published payoff is roughly a twofold variance reduction
+at equal cost; the iterative refit that converges in five rounds needs measured variances
+and therefore a round trip through the MD engine, which is out of scope here.
+
+.. warning::
+
+   **Optimal design buys precision. It does not promise accuracy.**
+
+   Over five TYK2 iterations NetBFE's :math:`\operatorname{tr} C` fell monotonically from
+   1.08 to 0.78 while the RMSE against experiment *rose* from 0.84 to 0.91. The criterion
+   measures how reproducible the numbers are, not how right they are -- it knows nothing
+   about the force field, the poses, or the protonation states. A network that halves its
+   predicted variance can be no closer to experiment than the one before it, and this is
+   the observed case, not a hypothetical one.
+
+   Read a falling :math:`\operatorname{tr} C` as "the statistics are no longer the
+   bottleneck", and take that as a cue to look at the model rather than as evidence the
+   answers improved.
+
+Reproducing a released behaviour
+--------------------------------
+
+Every knob added after v0.4.0 defaults to what v0.4.0 did, so an existing command keeps
+planning the network it always planned. That is a promise about *defaults*, and defaults
+move: a later release may well decide that ``n_edges`` should follow ``n ln n``, or that
+cycle coverage should be measured over edges rather than nodes. When that happens, every
+network planned before it becomes irreproducible unless the old behaviour is still
+reachable by name.
+
+``--compat`` is that name::
+
+   rbfenet plan --ligands ligands.sdf --compat v0.4 --out network.json
+
+It pins every algorithmic knob -- mapper, scorer, soft-core policy, planner, and the whole
+of selection -- to the values the named release used. Those values are written out
+literally in :data:`rbfenetmap.cli._args.COMPAT_CLI_PINS` and in
+:meth:`rbfenetmap.core.options.NetworkOptions.preset`, rather than being read back from the
+current defaults. That is the entire mechanism: a table derived from the defaults would
+move when they moved and would silently stop reproducing the version it names.
+
+Versioned, not a boolean
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+There is deliberately no ``--legacy``. A boolean stops meaning anything the moment there
+are two past behaviours to choose between, and the flag has to keep being unambiguous
+several releases from now.
+
+What is pinned, and what is not
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Pinned: the *algorithmic* surface -- the knobs whose meaning or default may change between
+releases.
+
+Not pinned, and usable alongside it:
+
+- **ligand intent** -- ``--hub``, ``--forced-edge``, ``--banned-edge``, ``--explicit-edge``.
+  Banning an edge is a statement about one ligand set, not about a version's behaviour.
+- **input preparation** -- ``--ligands``, ``--align`` and friends. That is which molecules
+  go in, not how they are planned.
+- **operational flags** -- ``--jobs``, ``--progress``, ``--out``, ``--export``. None of
+  them can change which network comes out.
+
+This is what makes the flag practical rather than merely principled: pinning ligand intent
+would leave ``--compat`` unable to plan a real series.
+
+Naming a pinned knob is a contradiction
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``--compat v0.4 --edges-per-ligand 3`` asks for v0.4's behaviour and for something other
+than v0.4's behaviour, so it is refused with the offending flag named. This follows the
+same rule as the ``n_edges`` conflict below: both resolutions are defensible, so neither is
+chosen on the user's behalf.
+
+Naming the knob is the contradiction, not disagreeing with it. ``--compat v0.4
+--edges-per-ligand 2`` is refused too, even though 2 is what v0.4 used. Accepting it
+because it happens to match today would make the rule depend on the current default, so
+the same command would start failing the day that default moved -- which is precisely the
+surprise ``--compat`` exists to prevent.
+
+The level is recorded in the network JSON as ``options.compat``, so a planned network
+states which behaviour produced it. A network planned without the flag writes no such key
+at all, leaving its output byte-for-byte what it was before the flag existed.
+
+Intermediate ligands
+--------------------
+
+Some pairs cannot be related by any mapping: the soft-core would be too large, the cores
+too dissimilar, the geometry irreconcilable. ``intermediates.mode`` lets the planner
+*invent* a molecule that sits between them, turning one impossible edge into two possible
+ones. It is off by default.
+
+The molecules themselves -- which generator proposes them, how they are posed, what
+certifies the pose, and what an export has to carry -- are :doc:`intermediates`. This
+section is about the *stage*: which gaps reach a generator, and how the result interacts
+with every other knob.
+
+``off``
+   Never. No generator is even constructed, so a run that does not ask for intermediates
+   never imports one.
+
+``bridge``
+   Only for pairs whose endpoints fall in different components of the feasible pool. This
+   is the mode that turns a hard connectivity failure into a planned network.
+
+``gaps``
+   Everything ``bridge`` does, and additionally infeasible pairs *inside* a component.
+   Those ends are already joined by some path, so an intermediate there buys accuracy
+   rather than connectivity.
+
+The stage sits between scoring and planning -- **map, repair, score, bridge, plan** -- and
+runs once over the settled candidate pool. Under adaptive evaluation it runs after the
+loop settles, never inside it: generating mid-loop would satisfy connectivity with
+invented vertices and stop the RBFE expansion the loop exists to drive.
+
+The generator proposes; nothing else
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Every sub-edge a generator proposes goes through the same
+:func:`~rbfenetmap.core.pipeline.build_candidate` as any other pair, with the user's own
+mapper, scorer, and soft-core policy. Nothing fabricates a transformation the way a
+counterpoised edge legitimately is fabricated, and the difference is not stylistic: a CBFE
+edge has no geometry to check, while an intermediate edge is nothing *but* geometry. A
+badly posed molecule therefore comes back as an ordinary ``core_geometry_mismatch``.
+
+A proposal is accepted or dropped **whole**. If the surviving feasible sub-edges do not
+actually connect the two ends of the gap, the invented molecules go with it -- there is no
+such thing as a partially useful intermediate, and an orphan synthetic vertex is a ligand
+nobody can compute a free energy for. This is the direct analogue of "an edge that cannot
+be repaired is rejected, not mutated".
+
+Every attempt, successful or not, is recorded on ``network.intermediates``; every accepted
+molecule carries a :class:`~rbfenetmap.core.models.LigandProvenance` naming its parents,
+the generator, and the pose RMSD.
+
+Against the other knobs
+~~~~~~~~~~~~~~~~~~~~~~~
+
+``cbfe_mode``
+   **Intermediates win, and this takes no precedence logic at all.** CBFE eligibility is
+   evaluated inside the planner, against the components of the pool it was handed.
+   Generation runs before the planner and changes that pool, so a gap an intermediate
+   closed is no longer a gap when components are computed and CBFE never triggers for it;
+   a gap it could not close is still a gap, and ``cbfe_mode="bridge"`` still rescues it.
+   That is *stay relative, fall back to counterpoised, only then fail* -- for free, from
+   stage order.
+
+``n_edges``
+   **The budget is spent, never inflated.** Each accepted intermediate is another vertex,
+   so spanning needs one more edge. Generation is given the headroom
+   ``n_edges - (n_ligands - 1)`` and stops when it runs out, recording
+   ``n_edges=12 left no room for intermediates; 2 gap(s) were not bridged`` on
+   ``unmet_constraints``. It does not raise: unlike a spanning tree that cannot fit, an
+   intermediate that cannot fit still leaves a valid network.
+
+``edges_per_ligand`` / ``min_cycle_coverage``
+   Synthetic vertices are excluded from the degree target and from the coverage
+   denominator -- the user asked for two edges per compound whose affinity they care
+   about, and an intermediate is scaffolding. They are **not** forbidden from carrying
+   cycles: ``A-M1-B-M2-A`` is a genuine consistency check on the real pair.
+
+``banned_edges``
+   A banned pair is never offered to a generator. ``A-M-B`` is a way of running exactly
+   the comparison the ban forbade, at twice the cost.
+
+``forced_edges``
+   A forced pair with no feasible mapping *is* offered, whatever the mode: the user
+   demanded that comparison, and an intermediate is the only way to keep it relative.
+
+``require_connected``
+   Generation runs either way. If a disconnection survives it, the refusal names the mode
+   and lists each gap that was offered along with why it was refused.
+
 Knob precedence
 ---------------
 
@@ -199,7 +782,7 @@ Knob precedence
      - Caps the redundancy pass. ``n_edges < n_ligands - 1`` with connectivity required is
        a **hard error** -- see below.
    * - 5
-     - ``edges_per_ligand``, ``min_cycle_coverage``
+     - ``edges_per_ligand``, ``min_cycle_coverage``, ``max_diameter``
      - Best-effort. Shortfalls warn and land on ``unmet_constraints``; never raise.
    * - 6
      - ``hub``
@@ -209,9 +792,34 @@ Knob precedence
      - A **feasibility** knob applied during repair: it changes the candidate pool, not
        the selection. Tightening it can disconnect the pool, which then errors at (3).
    * - 8
+     - ``intermediates.mode``
+     - Widens the pool by adding **vertices**, not just edges. Applied after scoring and
+       before selection, so a gap is offered to a generator only once the real pool is
+       exhausted for it. The only knob here that changes the vertex set.
+   * - 9
      - ``cbfe_mode``
      - Widens the pool rather than steering selection. Applied *before* cost competition,
        so it can rescue (3) without ever displacing a feasible RBFE edge.
+   * - 10
+     - ``cluster_by``, ``cluster_bridges``
+     - Narrows the pool, before everything above except (1) and (2): cross-cluster
+       candidates are pruned to ``cluster_bridges`` per joined cluster pair. Never at the
+       expense of (3) -- a crossing needed to span the ligands is restored and reported.
+   * - 11
+     - ``design``
+     - Replaces the *objective* of (5) rather than competing with it, and only under the
+       ``optimal`` planner. (1) to (4) still bind: banned edges stay out, forced edges stay
+       in, the network still spans, and ``n_edges`` still caps. What changes is what fills
+       the remaining budget -- the criterion instead of cost and degree targets -- so
+       ``edges_per_ligand`` and ``min_cycle_coverage`` drop to reporting only.
+   * - 12
+     - ``design_total_ns``
+     - Not a selection knob at all. Applied after planning, at export, over whatever edges
+       were chosen; it changes how the network is run, never which network it is.
+
+``--compat`` is not in this table. It is a *constructor*: it writes the values the rest of
+the table then operates on, so it is applied before precedence rather than competing inside
+it.
 
 Why the ``n_edges`` conflict is a hard error
 --------------------------------------------
@@ -227,12 +835,103 @@ arithmetic spelled out:
    n_edges=8 cannot connect 12 ligands; a spanning network needs at least 11 edges.
    Raise n_edges to >= 11, or pass require_connected=False.
 
+Edge budget
+-----------
+
+Pitman *et al.*, *JCIM* 2023, 63, 1776-1793 derive a floor of roughly ``n ln n`` edges,
+below which precision degrades **faster as the series grows**. At 40 ligands that is 148
+edges, where the default ``edges_per_ligand=2`` buys about 40.
+
+The package reports the comparison and does not warn about it. With the default settings
+every network this tool has ever planned sits below the floor, so a
+:func:`warnings.warn` would fire on every run and be filtered out within a week. It
+appears in the ``plan`` summary and in ``rbfenet diagnose`` instead, where the user asked
+for it. It is a floor for *precision*, not for correctness: a network below it is valid,
+its free energies simply carry more uncertainty than a denser one over the same ligands.
+
+Diagnostics
+-----------
+
+``rbfenet diagnose --network network.json`` reports the network-level metrics:
+total and per-edge cost, degree spread and isolated ligands, diameter, short cycle count,
+Monte-Carlo failure robustness, and the edge-budget comparison above. The same table is
+folded into the HTML report.
+
+``inspect`` stays per-edge and ``diagnose`` is per-network; they are separate commands
+because they answer questions at different scales.
+
+The robustness estimate removes each edge independently with probability
+``--failure-rate`` and reports how often the remainder still spans, plus how many ligands
+survive on average. :func:`~rbfenetmap.core.diagnostics.failure_robustness` takes a
+**mandatory** seed -- it is the only Monte-Carlo function in the package, everything
+around it asserts determinism, and a defaulted seed is a defaulted seed right up until
+someone leaves it off. The CLI and the HTML report supply a fixed one so two runs over the
+same file agree.
+
+Cost in machine time
+--------------------
+
+``--cost-units gpu_hours`` restates the network cost as estimated GPU-hours and a dollar
+figure, using the measured per-edge figures from Tsai *et al.*, *JCIM* 2026, 66, 1626-1636
+(3.97 GPU-h per RBFE edge at 12 lambda windows, 3.2x that for a counterpoised one at 25)
+priced at Pitman 2023's $0.40 per GPU-hour.
+
+**This is reporting only.** ``cbfe_base_cost`` is untouched, no planner reads a
+:class:`~rbfenetmap.core.cost.CostModel`, and the flag cannot move a single edge. A
+wall-clock price is a constant per edge kind, and feeding it into selection would make
+counterpoised edges uniformly unaffordable -- which is precisely the confusion the
+"eligibility is a gate, not a price" rule above exists to prevent.
+
+``--cost-units`` is also deliberately absent from ``--compat``'s pin tables. It is a
+display unit on the same footing as ``--format``: reproducing a released behaviour is a
+claim about which network comes out, not about what units it is printed in.
+
+Importing an existing map
+-------------------------
+
+:func:`~rbfenetmap.io.loaders.load_fepplus_network` and
+:func:`~rbfenetmap.io.loaders.load_orion_network` read a Schrodinger FEP+ (``A >>> B``) or
+OpenEye Orion (``A >> B``) edge list into ``explicit_pairs``::
+
+   from rbfenetmap.core.options import NetworkOptions
+   from rbfenetmap.io.loaders import load_fepplus_network
+
+   options = NetworkOptions(
+       pair_strategy="explicit", explicit_pairs=load_fepplus_network("map.edge")
+   )
+
+Only the topology is imported; the foreign atom mappings are not read, and this package
+maps every imported pair itself. That is the point rather than a limitation -- the reason
+to import a map is usually to put it through this package's feasibility rules -- but it
+does mean an edge FEP+ was happy with can come back rejected, and the ``explicit`` planner
+says so loudly instead of dropping it.
+
 Other planners
 --------------
 
+``redundant-mst``
+   ``n_redundancy`` overlaid spanning trees: run Kruskal, delete the edges it chose from a
+   working copy, and run it again. Konnektor builds its default network this way with two
+   trees; the paper that introduced the topology uses three. The point is not more edges
+   but *independent* ones -- a ligand's second edge belongs to a structure that spans
+   without the first tree, rather than to whatever the greedy degree pass found cheap
+   nearby. The usual redundancy passes then run on top, unchanged.
+
 ``star``
-   Every ligand joined to one hub. The hub defaults to the most central compound -- the
-   one with the most feasible partners, tie-broken on total cost.
+   Every ligand joined to one hub. ``hub_selection`` decides which, and OpenEye's own
+   documentation calls that choice the dominant factor in a star map's performance.
+
+   ``most_partners`` (default)
+      The most feasible partners, tie-broken on total cost. Cost is therefore never
+      compared across ligands of differing connectivity, so the cheapest well-connected
+      hub can lose to a slightly better-connected expensive one.
+
+   ``min_total_cost``
+      Lowest summed cost to *every other ligand*, charging an unreachable partner the
+      worst cost in the pool. This is LOMAP's ``pick_lead`` and HiMap's ``ref_lig_gen``,
+      which sum a similarity matrix in which an unrelatable pair scores zero. Summing only
+      the feasible partners would invert the intent: a ligand with one cheap partner would
+      total less than a well-connected one and win outright.
 
 ``explicit``
    Exactly the edges named. Refuses to silently omit an infeasible one.

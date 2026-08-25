@@ -30,6 +30,7 @@ __all__ = (
     "add_ligand_arguments",
     "add_mapping_arguments",
     "add_network_arguments",
+    "add_scorer_arguments",
     "add_softcore_arguments",
     "build_alignment_options",
     "build_mapping_options",
@@ -393,6 +394,21 @@ def add_mapping_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="A",
         help="Geometric cutoff for geometry-based mappers, in angstroms (default: %(default)s).",
     )
+
+
+def add_scorer_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add the scorer-selection flags.
+
+    Lives here rather than in :mod:`rbfenetmap.cli.main` beside its four siblings, so that
+    the whole ``plan`` surface can be assembled from public functions. Anything that wants
+    to reason about the flags -- a form generator, a documentation build -- needs the same
+    five groups, and one of them being private made that impossible without reaching into
+    another module's underscore.
+    """
+    group = parser.add_argument_group("scoring")
+    group.add_argument("--scorer", default="linear", help="Scorer plugin (default: %(default)s).")
+    group.add_argument("--weights", action="append", metavar="K=V", help="Override a scoring weight, repeatable.")
+    group.add_argument("--weights-file", type=Path, metavar="PATH", help="JSON file of scoring weights.")
 
 
 def add_softcore_arguments(parser: argparse.ArgumentParser) -> None:

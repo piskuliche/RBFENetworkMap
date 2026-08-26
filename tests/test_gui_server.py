@@ -27,6 +27,16 @@ pytestmark = pytest.mark.integration
 GOLDEN_SDF = Path(__file__).resolve().parent / "data" / "golden_benzamides.sdf"
 TYK2_DIR = Path(__file__).resolve().parents[1] / "examples" / "data" / "tyk2"
 
+#: A soft-core budget tight enough to refuse most of the golden series while still planning
+#: a network: 9 edges over 15 rejections. Asserted rather than skipped on, so a fixture that
+#: stops rejecting fails loudly instead of quietly testing nothing.
+REJECTING = {"max_softcore_atoms": 3, "allow_disconnected": True}
+
+#: Tight enough to force counterpoised bridges, which is what makes a pair both selected
+#: (as CBFE) and refused (as RBFE) with the same key -- the case that put the collection in
+#: the request path rather than leaving it to be inferred.
+SHARED_PAIR = {"max_softcore_atoms": 3, "cbfe": "bridge"}
+
 
 @pytest.fixture
 def server():
@@ -394,3 +404,180 @@ class TestStrictJson:
             body, _ = get_raw(base, path)
             assert b"Infinity" not in body and b"NaN" not in body
             json.loads(body)
+
+
+class TestEdgeDetail:
+    """Hovering an edge asks for its soft-core partition and the facts around it."""
+
+    def test_a_selected_edge_carries_facts_masks_and_pictures(self, server):
+        base, session = server
+        run = wait_for(base, post(base, "/api/plan", {"values": {}})["id"])
+        key = session.runs[run["id"]].network.edges[0].key
+
+        detail = get(base, f"/api/run/{run['id']}/edge/{key}")
+        assert detail["key"] == key
+        assert detail["selected"] is True
+        assert detail["cost"] is not None
+        assert set(detail["masks"]) == {"timask1", "timask2", "scmask1", "scmask2"}
+        for side in ("source", "target"):
+            assert detail["after"][side].lstrip().startswith("<svg")
+
+    def test_the_depictions_have_no_xml_prolog(self, server):
+        """They are injected through innerHTML into a live tree, not inlined into a file."""
+        base, session = server
+        run = wait_for(base, post(base, "/api/plan", {"values": {}})["id"])
+        key = session.runs[run["id"]].network.edges[0].key
+        detail = get(base, f"/api/run/{run['id']}/edge/{key}")
+        assert "<?xml" not in detail["after"]["source"]
+
+    def test_an_edge_resolves_by_either_direction(self, server):
+        """Planners orient their selected edges, so a caller may hold either key."""
+        base, session = server
+        run = wait_for(base, post(base, "/api/plan", {"values": {}})["id"])
+        edge = session.runs[run["id"]].network.edges[0]
+        forward = get(base, f"/api/run/{run['id']}/edge/{edge.key}")
+        backward = get(base, f"/api/run/{run['id']}/edge/{edge.target}~{edge.source}")
+        assert forward["key"] == backward["key"] == edge.key
+
+    def test_a_rejected_candidate_is_inspectable(self, server):
+        """The half that makes this a diagnostic tool: a refused pair still has pictures."""
+        base, session = server
+        run = wait_for(base, post(base, "/api/plan", {"values": REJECTING})["id"])
+        network = session.runs[run["id"]].network
+        assert network is not None and network.rejected, "REJECTING no longer rejects anything"
+
+        detail = get(base, f"/api/run/{run['id']}/candidate/{network.rejected[0].key}")
+        assert detail["feasible"] is False
+        assert detail["rejections"]
+        assert detail["after"]["source"]
+
+    def test_a_rejected_cost_is_null_not_infinity(self, server):
+        """math.inf renders as a token JSON.parse rejects; every rejected edge carries it."""
+        base, session = server
+        run = wait_for(base, post(base, "/api/plan", {"values": REJECTING})["id"])
+        network = session.runs[run["id"]].network
+        assert network is not None and network.rejected, "REJECTING no longer rejects anything"
+
+        body, _ = get_raw(base, f"/api/run/{run['id']}/candidate/{network.rejected[0].key}")
+        assert b"Infinity" not in body
+        assert json.loads(body)["cost"] is None
+
+    def test_masks_are_withheld_from_a_rejected_candidate(self, server):
+        """build_amber_masks would succeed -- the mapping is merely infeasible, not
+        malformed -- and hand somebody runnable strings off a card whose entire message is
+        that this edge was refused."""
+        base, session = server
+        run = wait_for(base, post(base, "/api/plan", {"values": REJECTING})["id"])
+        network = session.runs[run["id"]].network
+        assert network is not None and network.rejected, "REJECTING no longer rejects anything"
+
+        detail = get(base, f"/api/run/{run['id']}/candidate/{network.rejected[0].key}")
+        assert "unavailable" in detail["masks"]
+        assert "rejected" in detail["masks"]["unavailable"]
+
+    def test_the_before_view_is_offered_only_when_the_repair_fired(self, server):
+        """On four of five rejection paths nothing was demoted, so pre_repair_partition
+        returns the current partition and a toggle would show two identical pictures."""
+        base, session = server
+        run = wait_for(base, post(base, "/api/plan", {"values": {}})["id"])
+        network = session.runs[run["id"]].network
+        for edge in network.edges:
+            detail = get(base, f"/api/run/{run['id']}/edge/{edge.key}")
+            assert (detail["before"] is not None) == edge.repair.applied
+
+    def test_atom_indices_are_opt_in(self, server):
+        """A repair trace names atom indices; pictures without them are half a tool."""
+        base, session = server
+        run = wait_for(base, post(base, "/api/plan", {"values": {}})["id"])
+        key = session.runs[run["id"]].network.edges[0].key
+        plain = get(base, f"/api/run/{run['id']}/edge/{key}")
+        indexed = get(base, f"/api/run/{run['id']}/edge/{key}?indices=1")
+        assert indexed["after"]["source"] != plain["after"]["source"]
+
+    def test_an_unknown_edge_is_a_404(self, server):
+        base, _ = server
+        run = wait_for(base, post(base, "/api/plan", {"values": {}})["id"])
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            get(base, f"/api/run/{run['id']}/edge/nosuch~pair")
+        assert exc.value.code == 404
+
+    def test_a_run_with_no_network_is_a_404_not_a_500(self, server):
+        """Hovering a stale diagram while a new run is going is the ordinary way here."""
+        base, _ = server
+        failed = wait_for(base, post(base, "/api/plan", {"values": {"n_edges": 1}})["id"])
+        assert failed["state"] == "error"
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            get(base, f"/api/run/{failed['id']}/edge/a~b")
+        assert exc.value.code == 404
+
+
+class TestScopeIsInThePath:
+    """One key can name a selected counterpoised edge and a refused relative candidate."""
+
+    def test_the_two_scopes_answer_different_questions(self, server):
+        base, session = server
+        run = wait_for(base, post(base, "/api/plan", {"values": SHARED_PAIR})["id"])
+        network = session.runs[run["id"]].network
+        assert network is not None
+
+        selected = {e.unordered_key for e in network.edges}
+        shared = next((c for c in network.rejected if c.unordered_key in selected), None)
+        assert shared is not None, "SHARED_PAIR no longer produces a bridged-and-refused pair"
+
+        as_edge = get(base, f"/api/run/{run['id']}/edge/{shared.key}")
+        as_candidate = get(base, f"/api/run/{run['id']}/candidate/{shared.key}")
+        assert as_edge["feasible"] is True
+        assert as_candidate["feasible"] is False
+        assert as_candidate["rejections"]
+
+
+class TestRejectedSummary:
+    def test_it_groups_by_reason_commonest_first(self, server):
+        base, session = server
+        run = wait_for(base, post(base, "/api/plan", {"values": REJECTING})["id"])
+        network = session.runs[run["id"]].network
+        assert network is not None and network.rejected, "REJECTING no longer rejects anything"
+
+        summary = get(base, f"/api/run/{run['id']}/rejected")
+        assert summary["total"] == len(network.rejected)
+        counts = [group["count"] for group in summary["groups"]]
+        assert counts == sorted(counts, reverse=True)
+        assert sum(counts) == summary["total"]
+
+    def test_every_group_states_what_it_omitted(self, server):
+        """A truncated list read as complete is how somebody concludes a pair was never
+        tried, which is exactly the wrong lesson to draw from a sparse network."""
+        base, session = server
+        run = wait_for(base, post(base, "/api/plan", {"values": REJECTING})["id"])
+        assert session.runs[run["id"]].network is not None
+
+        for group in get(base, f"/api/run/{run['id']}/rejected")["groups"]:
+            assert group["omitted"] == group["count"] - len(group["pairs"])
+            assert group["omitted"] >= 0
+
+    def test_a_clean_network_reports_nothing(self, server):
+        base, session = server
+        run = wait_for(base, post(base, "/api/plan", {"values": {}})["id"])
+        summary = get(base, f"/api/run/{run['id']}/rejected")
+        assert summary["total"] == len(session.runs[run["id"]].network.rejected)
+
+
+class TestTheDiagramCarriesHooks:
+    def test_the_gui_diagram_is_interactive_and_the_report_is_not(self, server):
+        """The page needs hooks; the report must stay byte-identical without them."""
+        base, session = server
+        run = wait_for(base, post(base, "/api/plan", {"values": {}})["id"])
+        assert run["svg"].count("data-edge=") == run["metrics"]["n_edges"]
+        assert "edge-hit" in run["svg"]
+
+        report, _ = get_raw(base, f"/api/run/{run['id']}/report")
+        assert b"data-edge=" not in report
+
+    def test_every_hook_resolves(self, server):
+        """A key in the diagram that the endpoint cannot answer is a dead hover."""
+        import re
+
+        base, _ = server
+        run = wait_for(base, post(base, "/api/plan", {"values": {}})["id"])
+        for key in re.findall(r'data-edge="([^"]+)"', run["svg"]):
+            assert get(base, f"/api/run/{run['id']}/edge/{key}")["key"] == key

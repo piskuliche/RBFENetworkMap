@@ -64,6 +64,39 @@ the defaults of 60 s and 8 jobs are some 20 GB before a single candidate is reta
 page works that out from the two knobs and warns before you start the run rather than after
 the machine has begun swapping.
 
+Seeing what an edge actually does
+---------------------------------
+
+Point at an edge in the network diagram and the panel below it fills with both ligands
+drawn side by side: the warm highlight is the soft-core that changes during the
+transformation, the cool one is the common core held fixed. The edges are keyboard
+reachable too, so tabbing to one fills the same panel.
+
+Alongside the pictures: the cost, the atom counts, which mapper produced the correspondence,
+the soft-core repair trace, and the Amber ``timask``/``scmask`` strings the exporter would
+write. On a repaired edge a toggle switches between the soft-core the mapper first proposed
+and the one the repair settled on, which is where a surprising repair becomes visible. An
+atom-index switch labels the depictions, because the repair trace names atoms by index and
+a trace beside unlabelled pictures is half a tool.
+
+Click to pin the panel, so you can move the pointer away and read it; click again, or press
+Escape, to release it.
+
+**Rejected pairs are inspectable the same way**, listed under the diagram and grouped by
+why they failed, commonest first. That grouping is usually the answer on its own: "112 pairs
+failed ``core_too_small``" explains a sparse network better than any single pair does. Each
+group states how many rows it left out, because a truncated list read as a complete one is
+how somebody concludes a pair was never tried.
+
+This is the half that makes the tool diagnostic rather than only exploratory. A rejection
+reason names *what* rule an edge broke; the picture shows *why*. A methyl moving between two
+ring nitrogens is two disjoint soft-core regions, and on a fused bicyclic the repair has to
+absorb the whole scaffold to join them -- obvious at a glance, invisible in a table.
+
+Some rejections draw both molecules entirely warm. That is not a rendering fault: a pair the
+mapper could not relate at all has no common core, so every atom is soft-core, and the panel
+says so.
+
 Why a second run is faster
 --------------------------
 

@@ -243,3 +243,31 @@ class TestInteractiveSvg:
         from rbfenetmap.viz.network_svg import render_network_svg
 
         assert "<script" not in render_network_svg(planned, interactive=True)
+
+
+class TestRepairRejection:
+    def test_a_partition_the_repair_abandoned_is_flagged(self, benzamides):
+        """When the repair gives up, the mapping stored on the edge is where it stopped.
+
+        So a candidate can carry a twelve-atom common core beside a ``no_common_core``
+        rejection, which reads as a contradiction unless something says the pictures are of
+        an abandoned attempt rather than a final answer.
+        """
+        from rbfenetmap.core.options import SoftcorePolicy
+
+        network = build_network(
+            benzamides,
+            network_options=NetworkOptions(require_connected=False, softcore=SoftcorePolicy(max_softcore_atoms=3)),
+        )
+        abandoned = [c for c in network.rejected if c.repair.rejection is not None]
+        assert abandoned, "fixture no longer produces a repair that gives up"
+        for candidate in abandoned:
+            facts = edge_facts(network, candidate)
+            assert facts["repair_rejection"] == candidate.repair.rejection.value
+
+    def test_an_ordinary_rejection_is_not_flagged(self, benzamides):
+        """A geometry or precheck refusal is not the repair giving up, and must not claim
+        the partition is unfinished when it is exactly what the mapper proposed."""
+        network = build_network(benzamides, network_options=NetworkOptions())
+        for edge in network.edges:
+            assert edge_facts(network, edge)["repair_rejection"] is None

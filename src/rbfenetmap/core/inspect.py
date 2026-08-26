@@ -142,7 +142,7 @@ def edge_facts(network: Network, edge: Transformation) -> dict[str, Any]:
         ``key``, ``source``, ``target``, ``kind``, ``selected``, ``feasible``, ``mapper``,
         the atom counts, ``cost`` (``None`` when infeasible -- see :func:`_finite`),
         ``rejections``, the repair's ``regions_before`` / ``regions_after`` / ``repaired`` /
-        ``n_demoted`` / ``trace``, ``descriptors``, ``contributions``, and ``synthetic``:
+        ``repair_rejection`` / ``n_demoted`` / ``trace``, ``descriptors``, ``contributions``, and ``synthetic``:
         the endpoints this package invented rather than read from a file.
 
     Notes
@@ -179,6 +179,12 @@ def edge_facts(network: Network, edge: Transformation) -> dict[str, Any]:
         "scorer": edge.score.scorer,
         "rejections": [reason.value for reason in edge.score.rejections],
         "repaired": edge.repair.applied,
+        # Which reason, if any, the *repair* itself raised -- as distinct from one the
+        # precheck or the geometry gate raised afterwards. The distinction matters to a
+        # caller drawing the partition: when the repair gives up, the mapping stored on the
+        # edge is where it stopped, not a final answer, so "common core 12" can sit beside
+        # a `no_common_core` rejection and read as a contradiction unless it is explained.
+        "repair_rejection": edge.repair.rejection.value if edge.repair.rejection is not None else None,
         "regions_before": edge.repair.n_fragments_before,
         "regions_after": edge.repair.n_fragments_after,
         "n_demoted": edge.repair.n_demoted,

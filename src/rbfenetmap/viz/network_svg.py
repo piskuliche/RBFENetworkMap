@@ -23,6 +23,11 @@ __all__ = ("render_network_svg",)
 
 _CBFE = EdgeKind.CBFE.value
 
+#: Stroke width of the invisible hit-line, in user units. Wide enough that a diagonal edge
+#: is a comfortable pointer target at the scales this canvas is viewed at, narrow enough
+#: that two edges meeting at a node do not fight over the pointer.
+_HIT_WIDTH = 14
+
 
 def _normalize(positions: dict[str, tuple[float, float]]) -> dict[str, tuple[float, float]]:
     """Rescale a layout into the unit square."""
@@ -132,6 +137,7 @@ def render_network_svg(
     seed: int = 7,
     margin: int = 60,
     edge_links: dict[tuple[str, str], str] | None = None,
+    interactive: bool = False,
 ) -> str:
     """Return a standalone SVG of the selected network.
 
@@ -153,6 +159,19 @@ def render_network_svg(
 
     Colour is still never the *only* signal. Every counterpoised edge says ``CBFE`` in its
     tooltip, and its card in the report carries a badge.
+
+    ``interactive`` adds hooks for a host that wants to respond to an edge being pointed at
+    or tabbed to: each edge is wrapped in a ``<g>`` carrying ``data-edge``, and gains an
+    invisible wide hit-line. **Off by default, and the report never asks for it** -- its
+    output has to stay byte-identical, and it is a document rather than an application.
+
+    The hit-line is not polish. SVG hit-testing covers only the painted stroke, and stroke
+    width here encodes cost: the cheapest edges are drawn at 4.5px and the dearest at 1px,
+    on a canvas a viewer then scales down. A one-pixel diagonal target cannot be pointed at
+    reliably, and tracking along one flickers as the pointer leaves and re-enters it.
+
+    The markup stays inert either way. No script is emitted, because the report and this
+    function share a renderer and a script in the report would break the thing it is for.
 
     A ligand this package *invented* is drawn with a dashed outline and its on-canvas label
     ends in ``SYN``. Two signals rather than one, and neither of them colour: the node
@@ -220,6 +239,20 @@ def render_network_svg(
         href = _edge_href(source, target, edge_links)
         if href:
             line = f'<a href="{html.escape(href, quote=True)}" aria-label="{html.escape(source)} to {html.escape(target)}">{line}</a>'
+        if interactive:
+            # The transformation's own key, not the loop variables: networkx hands back an
+            # undirected edge's endpoints in either order, while the key has to name the
+            # edge as the planner oriented it.
+            key = data["transformation"].key
+            label = f"{'counterpoised ' if is_cbfe else ''}edge {key}, cost {data['weight']:.3f}"
+            line += (
+                f'<line class="edge-hit" x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
+                f'stroke="transparent" stroke-width="{_HIT_WIDTH}" pointer-events="stroke"/>'
+            )
+            line = (
+                f'<g class="edge-group" data-edge="{html.escape(key, quote=True)}" tabindex="0" '
+                f'role="button" aria-label="{html.escape(label, quote=True)}">{line}</g>'
+            )
         parts.append(line)
 
     for node, data in graph.nodes(data=True):

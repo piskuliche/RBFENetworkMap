@@ -622,41 +622,45 @@ def cmd_gui(args: argparse.Namespace) -> int:
 
 def cmd_inspect(args: argparse.Namespace) -> int:
     """Show everything known about one edge of a planned network."""
+    from rbfenetmap.core.inspect import edge_facts, resolve_edge
     from rbfenetmap.io.networkio import load_network
 
     network = load_network(Path(args.network))
-    source, target = parse_edge_key(args.edge)
-    wanted = tuple(sorted((source, target)))
-
-    edge = next((e for e in (*network.edges, *network.candidates) if e.unordered_key == wanted), None)
-    if edge is None:
+    try:
+        # "any": this command answers "tell me about this pair", so a selected edge wins
+        # over the candidate it came from. The GUI, which has to be able to ask about the
+        # refused candidate for a bridged pair, passes a narrower scope.
+        edge = resolve_edge(network, args.edge, scope="any")
+    except ValueError as exc:
         known = sorted({e.key for e in network.edges})
-        raise RBFENetworkMapError(f"Edge {args.edge!r} is not in {args.network}. Selected edges: {known}.")
+        raise RBFENetworkMapError(f"Edge {args.edge!r} is not in {args.network}. Selected edges: {known}.") from exc
 
-    selected = any(e.unordered_key == wanted for e in network.edges)
-    print(f"edge          {edge.key}")
-    print(f"kind          {edge.kind.value}")
-    print(f"selected      {'yes' if selected else 'no'}")
-    print(f"mapper        {edge.mapping.method}")
-    print(f"common core   {edge.mapping.n_common_core} pair(s)")
-    print(f"soft-core     {edge.mapping.n_softcore_1} / {edge.mapping.n_softcore_2} atom(s)")
-    print(f"regions       {edge.repair.n_fragments_before} -> {edge.repair.n_fragments_after}")
-    print(f"cost          {edge.score.total if edge.feasible else 'inf (rejected)'}")
-    if edge.score.rejections:
-        print(f"rejections    {', '.join(r.value for r in edge.score.rejections)}")
+    facts = edge_facts(network, edge)
+    print(f"edge          {facts['key']}")
+    print(f"kind          {facts['kind']}")
+    print(f"selected      {'yes' if facts['selected'] else 'no'}")
+    print(f"mapper        {facts['mapper']}")
+    print(f"common core   {facts['n_common_core']} pair(s)")
+    print(f"soft-core     {facts['n_softcore_1']} / {facts['n_softcore_2']} atom(s)")
+    print(f"regions       {facts['regions_before']} -> {facts['regions_after']}")
+    # edge_facts nulls a non-finite cost, because Infinity is not JSON. The rejected case
+    # still reads as it always has here.
+    print(f"cost          {facts['cost'] if facts['cost'] is not None else 'inf (rejected)'}")
+    if facts["rejections"]:
+        print(f"rejections    {', '.join(facts['rejections'])}")
 
-    if args.show_repair_trace and edge.repair.trace:
+    if args.show_repair_trace and facts["trace"]:
         print("\nrepair trace")
-        for line in edge.repair.trace:
+        for line in facts["trace"]:
             print(f"  {line}")
 
-    if args.show_descriptors and edge.score.descriptors:
+    if args.show_descriptors and facts["descriptors"]:
         print("\ndescriptors")
-        for key, value in sorted(edge.score.descriptors.items()):
+        for key, value in sorted(facts["descriptors"].items()):
             print(f"  {key:28s} {value:.4f}")
-        if edge.score.contributions:
+        if facts["contributions"]:
             print("\ncost contributions")
-            for key, value in sorted(edge.score.contributions.items(), key=lambda kv: -kv[1]):
+            for key, value in sorted(facts["contributions"].items(), key=lambda kv: -kv[1]):
                 print(f"  {key:28s} {value:.4f}")
 
     if args.show_masks:

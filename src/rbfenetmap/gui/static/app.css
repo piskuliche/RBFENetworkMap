@@ -121,3 +121,58 @@ thead th { color: var(--muted); font-weight: 600; }
   main { flex-direction: column; }
   #knobs { flex: 1 1 auto; width: 100%; max-height: none; }
 }
+
+/* -- the soft-core panel ------------------------------------------------------ */
+
+.edge-detail {
+  margin-top: .6rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.edge-detail.pinned { border-color: var(--accent); box-shadow: 0 0 0 3px #4a90d922; }
+.detail-head {
+  display: flex; flex-wrap: wrap; gap: .5rem; align-items: baseline;
+  justify-content: space-between; padding: .5rem .7rem; border-bottom: 1px solid var(--line);
+}
+.detail-head h3 { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .95rem; }
+.detail-meta { color: var(--muted); font-size: .82rem; }
+.detail-controls { display: flex; gap: .35rem; align-items: center; }
+.detail-controls label { font-size: .78rem; color: var(--muted); display: flex; gap: .25rem; align-items: center; }
+
+/* The depictions carry an opaque white background rect from RDKit, so the panes get a
+   light surface on purpose rather than looking like a rendering fault in a dark theme. */
+.panes { display: flex; flex-wrap: wrap; gap: .6rem; padding: .6rem .7rem; }
+.panes svg {
+  flex: 1 1 18rem; min-width: 0; max-width: 100%; height: auto;
+  background: #fff; border: 1px solid var(--line); border-radius: 6px;
+}
+.detail-note { padding: 0 .7rem .5rem; font-size: .8rem; color: var(--muted); }
+.detail-note.warn-note { color: var(--warn); }
+.detail-section { border-top: 1px solid var(--line); padding: .45rem .7rem; }
+.detail-section > summary { cursor: pointer; font-size: .82rem; color: var(--muted); }
+.detail-section pre {
+  margin: .4rem 0 0; padding: .4rem .5rem; overflow-x: auto; font-size: .78rem;
+  background: var(--bg); border-radius: 4px;
+}
+.masks { display: grid; grid-template-columns: auto 1fr; gap: .1rem .6rem; font-size: .8rem; margin: .4rem 0 0; }
+.masks dt { font-family: ui-monospace, monospace; color: var(--muted); }
+.masks dd { margin: 0; font-family: ui-monospace, monospace; overflow-x: auto; }
+
+/* -- the rejected list -------------------------------------------------------- */
+
+#rejected { margin-top: .8rem; }
+.reject-group { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; margin-bottom: .35rem; }
+.reject-group > summary { padding: .4rem .7rem; cursor: pointer; font-size: .85rem; }
+.reject-group .count { color: var(--muted); }
+.reject-rows { display: flex; flex-wrap: wrap; gap: .3rem; padding: 0 .7rem .5rem; }
+.reject-rows button {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .78rem; padding: .15rem .45rem;
+}
+.reject-omitted { padding: 0 .7rem .5rem; font-size: .78rem; color: var(--muted); }
+
+/* Keyboard reachability is not decoration here: the edges carry tabindex, so the focus
+   ring is how somebody navigating by keyboard knows which edge the panel is describing. */
+#diagram [data-edge]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#diagram [data-edge]:hover { cursor: pointer; }

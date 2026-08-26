@@ -34,6 +34,22 @@ logger = logging.getLogger(__name__)
 __all__ = ("PlanRun", "PlanSession", "expand_ligand_paths")
 
 
+def _strip_prolog(svg: str) -> str:
+    """Drop RDKit's XML declaration from a depiction.
+
+    ``MolDraw2DSVG`` emits ``<?xml version='1.0' encoding='iso-8859-1'?>`` ahead of the
+    root element. Inside an HTML document that is parsed as a bogus comment and ignored,
+    which is why the report gets away with inlining it -- but the page injects these
+    through ``innerHTML`` into a live tree, and a declaration that reaches a real XML
+    parser is an error rather than a curiosity. Cheaper to remove it than to rely on
+    everything downstream being lenient.
+    """
+    body = svg.lstrip()
+    if body.startswith("<?xml"):
+        body = body[body.index("?>") + 2 :].lstrip()
+    return body
+
+
 def expand_ligand_paths(paths: Sequence[str | Path]) -> list[Path]:
     """Resolve ligand inputs the way a shell would before ``--ligands`` sees them.
 
@@ -147,6 +163,145 @@ class PlanRun:
         if include_svg:
             payload["svg"] = self.svg
         return payload
+
+    def edge_detail(self, key: str, *, scope: str = "edges", show_indices: bool = False) -> dict[str, Any]:
+        """Everything the soft-core panel shows for one edge.
+
+        Parameters
+        ----------
+        key : str
+            An ``"a~b"`` edge key, in either direction.
+        scope : {"edges", "candidates"}
+            Which collection to resolve in. In the path rather than inferred, because one
+            key can name both a selected counterpoised edge and the relative candidate that
+            was refused for the same pair.
+        show_indices : bool
+            Label atoms with their indices. Worth offering: the repair trace names atom
+            indices, so a trace beside pictures without them is half a tool.
+
+        Returns
+        -------
+        dict
+            :func:`~rbfenetmap.core.inspect.edge_facts`, plus ``masks``, plus ``after`` and
+            ``before`` depiction pairs. ``before`` is ``None`` unless the repair fired.
+
+        Raises
+        ------
+        ValueError
+            If the run has no network yet, or *key* names no edge in *scope*.
+        """
+        from rbfenetmap.core.inspect import edge_facts, resolve_edge
+
+        if self.network is None:
+            raise ValueError(f"Run {self.id} is {self.state} and has no network to inspect.")
+
+        edge = resolve_edge(self.network, key, scope=scope)  # type: ignore[arg-type]
+        detail = edge_facts(self.network, edge)
+        detail["masks"] = self._masks(edge)
+        detail["after"] = self._depict(edge, show_indices=show_indices)
+        # Only when the repair actually demoted something. On four of the five rejection
+        # paths in build_candidate nothing was demoted, so pre_repair_partition returns the
+        # current partition and a toggle would offer two identical pictures.
+        detail["before"] = self._depict_pre_repair(edge, show_indices=show_indices) if edge.repair.applied else None
+        return detail
+
+    def _masks(self, edge) -> dict[str, Any]:
+        """Return the Amber masks for *edge*, or a stated reason there are none."""
+        from rbfenetmap.core.models import EdgeKind
+
+        if edge.kind is EdgeKind.CBFE:
+            # The same refusal the exporter and `rbfenet inspect` make: masks here would
+            # describe a different, and runnable, calculation.
+            return {"unavailable": "a CBFE edge decouples both ligands and has no atom mapping."}
+        if not edge.feasible:
+            # build_amber_masks would succeed -- the mapping is well formed, merely
+            # infeasible -- and hand somebody runnable strings off a card whose entire
+            # message is that this edge was refused.
+            return {"unavailable": "this candidate was rejected; it has no run to configure."}
+
+        from rbfenetmap.core.exceptions import ExporterError
+        from rbfenetmap.io.amber_masks import build_amber_masks
+
+        assert self.network is not None
+        try:
+            masks = build_amber_masks(
+                self.network.ligands[edge.source], self.network.ligands[edge.target], edge.mapping
+            )
+        except ExporterError as exc:
+            # An atom-name collision is a real possibility on a mol2 set prepared without
+            # unique names. It must not take the depictions down with it.
+            return {"unavailable": str(exc)}
+        return masks.as_dict()
+
+    def _depict(self, edge, *, show_indices: bool) -> dict[str, str]:
+        """Draw *edge* as the repair left it."""
+        from rbfenetmap.viz.depict import render_edge_svg
+
+        assert self.network is not None
+        source, target = render_edge_svg(edge, self.network.ligands, show_indices=show_indices)
+        return {"source": _strip_prolog(source), "target": _strip_prolog(target)}
+
+    def _depict_pre_repair(self, edge, *, show_indices: bool) -> dict[str, str]:
+        """Draw *edge* as the mapper proposed it, before any demotion."""
+        from rbfenetmap.viz.depict import render_molecule_svg
+        from rbfenetmap.viz.gallery import pre_repair_partition
+
+        assert self.network is not None
+        sc1, cc1, sc2, cc2 = pre_repair_partition(edge)
+        source = self.network.ligands[edge.source]
+        target = self.network.ligands[edge.target]
+        return {
+            "source": _strip_prolog(
+                render_molecule_svg(
+                    source.mol,
+                    softcore=sc1,
+                    core=cc1,
+                    title=f"{edge.source} (soft-core {len(sc1)}, as mapped)",
+                    show_indices=show_indices,
+                )
+            ),
+            "target": _strip_prolog(
+                render_molecule_svg(
+                    target.mol,
+                    softcore=sc2,
+                    core=cc2,
+                    title=f"{edge.target} (soft-core {len(sc2)}, as mapped)",
+                    show_indices=show_indices,
+                )
+            ),
+        }
+
+    def rejected_summary(self, *, per_reason: int = 25) -> dict[str, Any]:
+        """Group this run's rejected candidates by reason, commonest first.
+
+        Grouped rather than listed because ten rejections is a readable list and a
+        fifty-ligand run rejects hundreds -- and because the grouping is itself the answer
+        more often than any single pair is: "112 pairs failed core_too_small" is what
+        explains a sparse network.
+
+        Every group states how many rows were omitted. A truncated list read as complete is
+        how somebody concludes a pair was never tried.
+        """
+        if self.network is None:
+            raise ValueError(f"Run {self.id} is {self.state} and has no network to inspect.")
+
+        groups: dict[str, list[Any]] = {}
+        for candidate in self.network.rejected:
+            reason = candidate.score.rejections[0].value if candidate.score.rejections else "unknown"
+            groups.setdefault(reason, []).append(candidate)
+
+        return {
+            "total": len(self.network.rejected),
+            "groups": [
+                {
+                    "reason": reason,
+                    "count": len(items),
+                    "omitted": max(len(items) - per_reason, 0),
+                    "pairs": [{"key": c.key, "source": c.source, "target": c.target} for c in items[:per_reason]],
+                }
+                for reason, items in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+            ],
+        }
 
     def report_html(self) -> str:
         """Render the full self-contained report, once, on demand.
@@ -370,10 +525,14 @@ class PlanSession:
 
         Stock seed, so the picture in the page is the picture in the report a click away.
         A different layout in each would make the two impossible to hold side by side.
+
+        ``interactive`` adds the per-edge hooks the page hangs its hover on, including a
+        wide invisible hit-line: stroke width encodes cost, so the dearest edges are drawn
+        a pixel wide and cannot otherwise be pointed at.
         """
         from rbfenetmap.viz.network_svg import render_network_svg
 
-        return render_network_svg(network)
+        return render_network_svg(network, interactive=True)
 
     def cancel(self, run_id: str) -> None:
         """Cancel a run by id, if it is still going."""

@@ -1,6 +1,6 @@
 """A small local HTTP server for the knob explorer.
 
-Standard library only. There are eight endpoints and one page, which a framework would
+Standard library only. There are eleven endpoints and one page, which a framework would
 make marginally pleasanter to write at the cost of a runtime dependency, an extra to
 install, an ``autodoc_mock_imports`` entry, and a module that
 ``tests/test_smoke.py``'s unconditional import walk would trip over in the default CI job.
@@ -20,7 +20,7 @@ from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Sequence
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from rbfenetmap.gui.schema import plan_schema
 from rbfenetmap.gui.session import PlanSession
@@ -137,11 +137,25 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(exc, status=500)
 
     def _run_get(self, rest: str) -> None:
-        """Handle ``/api/run/<id>``, ``/report`` and ``/network.json``."""
+        """Handle ``/api/run/<id>`` and its per-run artifacts."""
         run_id, _, tail = rest.partition("/")
         run = self.session.runs.get(run_id)
         if run is None:
             return self._json({"error": f"No run {run_id!r}."}, status=404)
+        kind, _, key = tail.partition("/")
+        if kind in ("edge", "candidate"):
+            # Which collection to resolve in is in the path, not inferred: one key can name
+            # both a selected counterpoised edge and the relative candidate refused for the
+            # same pair, and guessing answers only one of the two questions.
+            scope = "edges" if kind == "edge" else "candidates"
+            # unquote, never unquote_plus: '+' is a legal ligand-name character and must
+            # not become a space. The path is not decoded for us -- see the traversal test.
+            return self._edge(run, unquote(key), scope=scope)
+        if tail == "rejected":
+            try:
+                return self._json(run.rejected_summary())
+            except ValueError as exc:
+                return self._json({"error": str(exc)}, status=404)
         if tail == "report":
             return self._send(200, run.report_html().encode(), "text/html; charset=utf-8")
         if tail == "network.json":
@@ -153,6 +167,19 @@ class _Handler(BaseHTTPRequestHandler):
         # Poll responses carry the SVG only once the run is finished, so a run being
         # polled every few hundred milliseconds is not also re-sending a diagram.
         self._json(run.as_dict(include_svg=run.state == "done"))
+
+    def _edge(self, run, key: str, *, scope: str) -> None:
+        """Serve one edge's facts, masks and depictions.
+
+        Everything a caller can get wrong here is a message rather than a traceback: a run
+        with no network yet, a key naming nothing, a ligand missing from the network. The
+        page shows all of them in the panel it would otherwise have filled.
+        """
+        indices = parse_qs(urlparse(self.path).query).get("indices", ["0"])[0] not in ("0", "", "false")
+        try:
+            return self._json(run.edge_detail(key, scope=scope, show_indices=indices))
+        except (ValueError, KeyError) as exc:
+            return self._json({"error": str(exc)}, status=404)
 
     def _static(self, name: str) -> None:
         """Serve one file from the package's static directory.

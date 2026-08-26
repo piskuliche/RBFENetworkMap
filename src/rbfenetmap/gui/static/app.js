@@ -256,7 +256,20 @@ function renderRun(run) {
     metrics.replaceChildren();
   }
 
+  if (detail.runId !== run.id) {
+    /* A new run means a new diagram, and possibly a different partition behind the same
+     * edge key once a soft-core knob has moved. */
+    detail.runId = run.id;
+    detail.rejectedFor = null;
+    resetDetail();
+    document.getElementById("rejected").replaceChildren();
+  }
+
   if (run.svg) document.getElementById("diagram").innerHTML = run.svg;
+  if (run.state === "done" && detail.rejectedFor !== run.id) {
+    detail.rejectedFor = run.id;
+    loadRejected(run.id);
+  }
 
   const block = document.getElementById("command-block");
   block.hidden = run.state !== "done";
@@ -300,6 +313,231 @@ function renderPins(pins) {
   });
   box.replaceChildren(el("h2", { text: "Pinned runs" }),
     el("table", {}, el("thead", {}, head), el("tbody", {}, ...rows)));
+}
+
+
+/* ------------------------------------------------- the soft-core detail panel */
+
+/* Hovering an edge asks the server for its partition. Kept out of the poll response
+ * deliberately: two depictions are ~47 KB, and shipping them for every edge on every tick
+ * is what would make the tool feel slow. */
+const detail = {
+  cache: new Map(),   /* keyed by run, because "a~b" is a different partition once a
+                         soft-core knob moves, and the string is the same in every run */
+  runId: null,
+  rejectedFor: null,
+  token: 0,           /* a later hover must win even if an earlier response lands after it */
+  timer: null,
+  pinned: false,
+  showBefore: false,
+  indices: false,
+  current: null,
+};
+
+const CACHE_LIMIT = 50;
+const detailKey = (runId, scope, key, indices) => `${runId} ${scope} ${key} ${indices ? 1 : 0}`;
+
+function resetDetail() {
+  detail.cache.clear();
+  detail.pinned = false;
+  detail.current = null;
+  detail.showBefore = false;
+  const panel = document.getElementById("edge-detail");
+  panel.hidden = true;
+  panel.classList.remove("pinned");
+}
+
+function trimCache() {
+  while (detail.cache.size > CACHE_LIMIT) detail.cache.delete(detail.cache.keys().next().value);
+}
+
+function renderDetail(data) {
+  const panel = document.getElementById("edge-detail");
+  panel.hidden = false;
+  panel.classList.toggle("pinned", detail.pinned);
+
+  if (data.error) {
+    panel.replaceChildren(el("div", { class: "detail-note warn-note", text: data.error }));
+    return;
+  }
+
+  const badges = [];
+  if (data.counterpoised) badges.push("CBFE");
+  if (data.synthetic.length) badges.push(`SYN: ${data.synthetic.join(", ")}`);
+  for (const reason of data.rejections) badges.push(reason);
+
+  const cost = data.cost == null ? "rejected" : `cost ${data.cost.toFixed(3)}`;
+  const counts = data.counterpoised
+    ? `${data.n_atoms_1}/${data.n_atoms_2} atoms fully decoupled, no atom mapping`
+    : `soft-core ${data.n_softcore_1}/${data.n_softcore_2}, common core ${data.n_common_core}`;
+  const who = data.counterpoised ? "protocol" : "mapper";
+  const meta = `${cost} · ${counts} · ${who} ${data.mapper}` +
+    (badges.length ? " · " + badges.join(" · ") : "");
+
+  const controls = el("div", { class: "detail-controls" });
+
+  if (data.before) {
+    const label = detail.showBefore ? "Show the repaired soft-core" : "Show it as the mapper proposed it";
+    const toggle = el("button", { text: label });
+    toggle.onclick = () => { detail.showBefore = !detail.showBefore; renderDetail(data); };
+    controls.append(toggle);
+  }
+
+  /* The repair trace names atom indices, so a trace beside pictures without them is half a
+   * tool. Re-fetches, because RDKit draws the indices server-side. */
+  const box = el("input", { type: "checkbox" });
+  box.checked = detail.indices;
+  box.onchange = () => {
+    detail.indices = box.checked;
+    if (detail.current) loadEdge(detail.current.scope, detail.current.key, { now: true });
+  };
+  controls.append(el("label", {}, box, document.createTextNode("atom indices")));
+
+  const pin = el("button", { text: detail.pinned ? "Unpin" : "Pin" });
+  pin.onclick = () => { detail.pinned = !detail.pinned; renderDetail(data); };
+  controls.append(pin);
+
+  const head = el("div", { class: "detail-head" },
+    el("div", {}, el("h3", { text: data.key }), el("div", { class: "detail-meta", text: meta })),
+    controls);
+
+  /* innerHTML, not el(): el() uses createElement and cannot build SVG children. */
+  const shown = detail.showBefore && data.before ? data.before : data.after;
+  const panes = el("div", { class: "panes" });
+  panes.innerHTML = shown.source + shown.target;
+
+  const parts = [head, panes];
+
+  if (detail.showBefore && data.before) {
+    parts.push(el("div", { class: "detail-note", text:
+      `As the mapper proposed it, before the repair demoted ${data.n_demoted} atom(s) to join ` +
+      `${data.regions_before.join("/")} soft-core region(s) into ${data.regions_after.join("/")}.` }));
+  }
+
+  /* mapper_failed and no_common_core yield a wholly soft-core mapping, so both molecules
+   * draw entirely warm. That is the rejection, not a drawing fault; the report carries the
+   * same note, and without it this reads as a bug. */
+  if (data.n_common_core === 0 && !data.counterpoised) {
+    parts.push(el("div", { class: "detail-note warn-note", text:
+      "No common core was found, so every atom is drawn as soft-core. " +
+      "That is the rejection itself, not a drawing fault." }));
+  }
+
+  if (data.trace.length) {
+    const section = el("details", { class: "detail-section" }, el("summary", { text: "soft-core repair trace" }));
+    section.append(el("pre", { text: data.trace.join(String.fromCharCode(10)) }));
+    parts.push(section);
+  }
+
+  const masks = el("details", { class: "detail-section" }, el("summary", { text: "amber masks" }));
+  if (data.masks.unavailable) {
+    masks.append(el("div", { class: "detail-note", text: data.masks.unavailable }));
+  } else {
+    const list = el("dl", { class: "masks" });
+    for (const name of ["timask1", "scmask1", "timask2", "scmask2"]) {
+      list.append(el("dt", { text: name }), el("dd", { text: data.masks[name] || "(empty)" }));
+    }
+    masks.append(list);
+  }
+  parts.push(masks);
+
+  panel.replaceChildren(...parts);
+}
+
+async function loadEdge(scope, key, { now = false } = {}) {
+  const runId = state.run && state.run.id;
+  if (!runId) return;
+  clearTimeout(detail.timer);
+  const token = ++detail.token;
+
+  const go = async () => {
+    const cacheKey = detailKey(runId, scope, key, detail.indices);
+    let data = detail.cache.get(cacheKey);
+    if (!data) {
+      const path = scope === "edges" ? "edge" : "candidate";
+      const query = detail.indices ? "?indices=1" : "";
+      try {
+        data = await api(`/api/run/${runId}/${path}/${encodeURIComponent(key)}${query}`);
+        detail.cache.set(cacheKey, data);
+        trimCache();
+      } catch (err) {
+        data = { error: err.message };
+      }
+    }
+    if (token !== detail.token) return;   /* a later hover already won */
+    detail.current = { scope, key };
+    renderDetail(data);
+  };
+
+  /* Debounced: sweeping across a dense diagram would otherwise fire a request per edge
+   * crossed, and the server spawns a thread for each one. */
+  if (now) return go();
+  detail.timer = setTimeout(go, 80);
+}
+
+function hoverTarget(event) {
+  const node = event.target.closest && event.target.closest("[data-edge]");
+  return node ? { key: node.dataset.edge, scope: node.dataset.scope || "edges" } : null;
+}
+
+function wireHover() {
+  /* Delegated, on the containers rather than the edges: renderRun assigns
+   * innerHTML = run.svg, which destroys any listener attached to a child. focusin as well
+   * as mouseover, since the edges carry tabindex and the rejected rows are buttons. */
+  for (const id of ["diagram", "rejected"]) {
+    const host = document.getElementById(id);
+    for (const type of ["mouseover", "focusin"]) {
+      host.addEventListener(type, (event) => {
+        if (detail.pinned) return;
+        const hit = hoverTarget(event);
+        if (hit) loadEdge(hit.scope, hit.key);
+      });
+    }
+    host.addEventListener("click", (event) => {
+      const hit = hoverTarget(event);
+      if (!hit) return;
+      event.preventDefault();
+      detail.pinned = true;
+      loadEdge(hit.scope, hit.key, { now: true });
+    });
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && detail.pinned) {
+      detail.pinned = false;
+      document.getElementById("edge-detail").classList.remove("pinned");
+    }
+  });
+}
+
+/* Fetched once when a run finishes, never in the 250 ms poll -- which omits even the
+ * network SVG for the same reason. */
+async function loadRejected(runId) {
+  const box = document.getElementById("rejected");
+  let summary;
+  try {
+    summary = await api(`/api/run/${runId}/rejected`);
+  } catch (err) {
+    return box.replaceChildren();
+  }
+  if (!summary.total) return box.replaceChildren();
+
+  const groups = summary.groups.map((group) => {
+    const rows = el("div", { class: "reject-rows" });
+    for (const pair of group.pairs) {
+      rows.append(el("button", { text: pair.key, "data-edge": pair.key, "data-scope": "candidates" }));
+    }
+    const node = el("details", { class: "reject-group" },
+      el("summary", {}, document.createTextNode(group.reason + " "),
+        el("span", { class: "count", text: `(${group.count})` })),
+      rows);
+    /* Always state what was left out: a truncated list read as complete is how somebody
+     * concludes a pair was never tried. */
+    if (group.omitted) {
+      node.append(el("div", { class: "reject-omitted", text: `${group.omitted} more not listed.` }));
+    }
+    return node;
+  });
+  box.replaceChildren(el("h2", { text: `Rejected pairs (${summary.total})` }), ...groups);
 }
 
 /* ------------------------------------------------------------------ driving */
@@ -367,6 +605,8 @@ async function main() {
     await post("/api/pin", { run_id: state.run.id, label });
     renderPins((await api("/api/session")).pins);
   };
+
+  wireHover();
 
   const session = await api("/api/session");
   if (session.ligands.paths.length) {

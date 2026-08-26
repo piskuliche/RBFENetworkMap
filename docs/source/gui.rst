@@ -18,6 +18,10 @@ metrics, pin the run, move another knob, compare.
 It is part of the package, not an extra: the server is standard library only, and there is
 nothing to install beyond what planning already needs.
 
+``--ligands`` takes what it takes everywhere else -- SDF, mol2, ``.smi``, directories, or
+several of them at once -- and so does the box in the page, which additionally expands a
+pattern like ``data/*.mol2`` for you, since there is no shell behind it to do that.
+
 The form is the command line
 ----------------------------
 

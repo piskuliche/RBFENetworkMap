@@ -20,13 +20,24 @@ artifact you email or attach to a ticket, this is an application and does use Ja
 
 from __future__ import annotations
 
-__all__ = ("plan_schema", "to_argv")
+__all__ = ("CachingMapper", "MappingCache", "RunCancelled", "plan_schema", "to_argv")
+
+
+#: Where each re-exported name actually lives, for the lazy import below.
+_SOURCES = {
+    "CachingMapper": "rbfenetmap.gui.cache",
+    "MappingCache": "rbfenetmap.gui.cache",
+    "RunCancelled": "rbfenetmap.gui.cache",
+    "plan_schema": "rbfenetmap.gui.schema",
+    "to_argv": "rbfenetmap.gui.schema",
+}
 
 
 def __getattr__(name: str) -> object:
-    """Import the schema helpers lazily, keeping this module import free of work."""
-    if name in __all__:
-        from rbfenetmap.gui import schema
+    """Import a re-exported name lazily, keeping this module's own import free of work."""
+    module_name = _SOURCES.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
 
-        return getattr(schema, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(importlib.import_module(module_name), name)

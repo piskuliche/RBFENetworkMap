@@ -309,6 +309,7 @@ def _adaptive_candidate_pool(
     planner: AbstractNetworkPlanner,
     mapping_options: MappingOptions,
     network_options: NetworkOptions,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> list[Transformation]:
     """Evaluate promising pairs in batches until the network targets are met.
 
@@ -358,6 +359,18 @@ def _adaptive_candidate_pool(
     with _PairProgress(len(pairs), enabled=network_options.show_progress) as progress:
         batch_number = 0
 
+        def notify(count: int = 1) -> None:
+            """Advance the stderr bar and the caller's counter together.
+
+            Both, rather than either-or as `evaluate_pairs` does it: this loop needs its
+            own display to render batch labels, and an embedding caller still has to hear
+            about every pair. The total a caller should divide by is ``len(pairs)``, which
+            the loop treats as a ceiling it may stop short of rather than a target.
+            """
+            progress.update(count)
+            if progress_callback is not None:
+                progress_callback(count)
+
         def evaluate(batch: Sequence[tuple[str, str]]) -> None:
             nonlocal batch_number
             if not batch:
@@ -372,7 +385,7 @@ def _adaptive_candidate_pool(
             )
             candidates.extend(
                 evaluate_pairs(
-                    ligands, batch, mapper, scorer, mapping_options, network_options, progress_callback=progress.update
+                    ligands, batch, mapper, scorer, mapping_options, network_options, progress_callback=notify
                 )
             )
 
@@ -975,6 +988,7 @@ def build_network(
     planner: AbstractNetworkPlanner | str = "mst",
     mapping_options: MappingOptions | None = None,
     network_options: NetworkOptions | None = None,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> Network:
     """Plan a perturbation network over *ligands*.
 
@@ -989,6 +1003,20 @@ def build_network(
         is not even resolved, so an unavailable optional mapper is not an error there.
     mapping_options : MappingOptions, optional
     network_options : NetworkOptions, optional
+    progress_callback : callable, optional
+        Called with the number of candidate pairs just finished, repeatedly, as the
+        mapping stage proceeds. Divide by the pair count to get a fraction.
+
+        For a caller with a progress bar of its own, and the reason this exists rather
+        than ``show_progress``: that knob writes to stderr, which suits a terminal and
+        suits nothing else. Mapping is where the time goes -- quadratic in the ligand
+        count, and over a thousand pairs by fifty ligands -- so an embedding program that
+        cannot report on it has nothing to show for minutes at a stretch.
+
+        Two limits worth knowing. Under ``pair_evaluation="adaptive"`` the loop stops as
+        soon as the targets are met, so the increments sum to *at most* the pair count
+        rather than exactly it. And the sub-edges of a generated intermediate are not
+        counted: they are a small, bounded stage that runs after this one.
 
     Returns
     -------
@@ -1071,12 +1099,20 @@ def build_network(
         # and stop the very RBFE expansion the loop exists to drive -- the same rationale
         # `_adaptive_candidate_pool` already documents for probing with CBFE off.
         candidates = _adaptive_candidate_pool(
-            ligands, pairs, mapper_obj, scorer_obj, planner_obj, mapping_options, network_options
+            ligands, pairs, mapper_obj, scorer_obj, planner_obj, mapping_options, network_options, progress_callback
         )
     else:
         if network_options.pair_evaluation == "adaptive":
             logger.info("Planner %r requires eager candidate evaluation; mapping the full pool", planner_obj.name)
-        candidates = evaluate_pairs(ligands, pairs, mapper_obj, scorer_obj, mapping_options, network_options)
+        candidates = evaluate_pairs(
+            ligands,
+            pairs,
+            mapper_obj,
+            scorer_obj,
+            mapping_options,
+            network_options,
+            progress_callback=progress_callback,
+        )
         n_feasible = sum(1 for c in candidates if c.feasible)
         logger.info("%d of %d candidate(s) are feasible", n_feasible, len(candidates))
 

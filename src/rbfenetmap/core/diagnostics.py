@@ -52,6 +52,7 @@ __all__ = (
     "network_cost",
     "network_efficiency",
     "summarize",
+    "summarize_json",
 )
 
 
@@ -419,4 +420,66 @@ def summarize(
         "diameter": diameter(network),
         "robustness": failure_robustness(network, failure_rate=failure_rate, n_repeats=n_repeats, seed=seed),
         "budget": edge_budget_advice(len(network.ligands), len(network.edges)),
+    }
+
+
+def summarize_json(network: "Network", **kwargs: Any) -> dict[str, Any]:
+    """Return :func:`summarize` flattened into JSON-ready primitives.
+
+    Parameters
+    ----------
+    network : Network
+    **kwargs
+        Passed through to :func:`summarize`.
+
+    Returns
+    -------
+    dict
+        The same keys :func:`summarize` produces, except that ``degrees``, ``robustness``
+        and ``budget`` -- which are dataclasses there -- arrive as the nested ``degree``,
+        ``robustness`` and ``edge_budget`` objects, and the cost summary from
+        :func:`rbfenetmap.core.cost.network_cost_summary` is merged in as ``gpu_hours``
+        and ``price``.
+
+    Notes
+    -----
+    This is the shape ``rbfenet diagnose --format json`` emits, and it is a function rather
+    than a literal inside that command because it is now emitted from two places. A second
+    consumer building its own dictionary would be a second answer to "how did this network
+    do", differing from the first the moment either gained a field -- and these numbers are
+    meant to be compared across runs, which only works while every run reports them the
+    same way.
+    """
+    from rbfenetmap.core.cost import network_cost_summary
+
+    report = summarize(network, **kwargs)
+    degrees, robustness, budget = report["degrees"], report["robustness"], report["budget"]
+    totals = network_cost_summary(network)
+    return {
+        "n_ligands": report["n_ligands"],
+        "n_edges": report["n_edges"],
+        "n_rbfe": report["n_rbfe"],
+        "n_cbfe": report["n_cbfe"],
+        "cost": report["cost"],
+        "efficiency": report["efficiency"],
+        "gpu_hours": totals["gpu_hours"],
+        "price": totals["price"],
+        "n_cycles": report["n_cycles"],
+        "max_cycle_length": report["max_cycle_length"],
+        "degree": {
+            "min": degrees.minimum,
+            "mean": degrees.mean,
+            "max": degrees.maximum,
+            "isolated": list(degrees.isolated),
+            "per_ligand": degrees.degrees,
+        },
+        "diameter": report["diameter"],
+        "robustness": {
+            "connected_fraction": robustness.connected_fraction,
+            "mean_ligands_retained": robustness.mean_ligands_retained,
+            "failure_rate": robustness.failure_rate,
+            "n_repeats": robustness.n_repeats,
+            "seed": robustness.seed,
+        },
+        "edge_budget": {"recommended": budget.recommended, "shortfall": budget.shortfall, "message": budget.message},
     }

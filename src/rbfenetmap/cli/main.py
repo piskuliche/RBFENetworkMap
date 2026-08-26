@@ -178,6 +178,27 @@ def build_parser() -> argparse.ArgumentParser:
     plugins.add_argument("--kind", choices=("mapper", "scorer", "planner", "exporter", "intermediate"))
     plugins.add_argument("--all", action="store_true", help="Include plugins whose backends are missing.")
 
+    # gui --------------------------------------------------------------------
+    # Deliberately not the shared plan groups: every knob the GUI offers is derived from
+    # them at runtime, and --ligands is optional here because a file can be chosen in the
+    # page. Repeating them as flags would be a third place they are written down.
+    gui = subparsers.add_parser("gui", help="Serve a local page for exploring the network knobs.")
+    gui.add_argument("--ligands", nargs="*", type=Path, metavar="PATH", help="Ligands to load at startup.")
+    gui.add_argument("--name-property", default="_Name", metavar="PROP", help="Property to read names from.")
+    gui.add_argument("--host", default="127.0.0.1", help="Interface to bind (default: %(default)s).")
+    gui.add_argument("--port", type=int, default=8765, help="Port to bind (default: %(default)s). 0 picks a free one.")
+    gui.add_argument("--no-browser", action="store_true", help="Do not open a browser window.")
+    gui.add_argument(
+        "--cache-dir",
+        type=Path,
+        metavar="DIR",
+        help=(
+            "Persist mapped atom correspondences here, so a later session does not repeat the "
+            "MCS searches. Mapping is where a plan spends its time and does not depend on the "
+            "planner, so this is what makes the second launch fast rather than only the second run."
+        ),
+    )
+
     # inspect ------------------------------------------------------------------
     inspect = subparsers.add_parser("inspect", help="Show everything known about one edge.")
     inspect.add_argument("--network", type=Path, required=True, help="Network JSON from `rbfenet plan`.")
@@ -198,6 +219,7 @@ _HANDLERS = {
     "replan": commands.cmd_replan,
     "report": commands.cmd_report,
     "plugins": commands.cmd_plugins,
+    "gui": commands.cmd_gui,
     "inspect": commands.cmd_inspect,
     "diagnose": commands.cmd_diagnose,
 }

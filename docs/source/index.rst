@@ -20,6 +20,7 @@ most one connected soft-core region per side.**
    concepts/intermediates
    variant_matrix
    cli
+   gui
    plugins
 
 .. toctree::

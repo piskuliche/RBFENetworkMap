@@ -12,6 +12,7 @@ Command line
    rbfenet plugins   List plugins and their availability.
    rbfenet inspect   Show everything known about one edge.
    rbfenet diagnose  Report network-level metrics for a planned network.
+   rbfenet gui       Serve a local page for exploring the network knobs.
 
 Exit codes: ``0`` success, ``1`` a package-level failure (unsatisfiable constraints, a
 missing plugin, unreadable input), ``2`` an argparse usage error. Package errors print a

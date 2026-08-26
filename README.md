@@ -286,6 +286,47 @@ before the mapping run. The HTML report draws them with a dashed outline and a `
 counts them separately from the real ligands, and lists each one's parents, generator and
 pose RMSD. `network.intermediates` records every gap attempted, bridged or not.
 
+## Exploring the knobs in a browser
+
+Sixty knobs is more than a shell loop makes pleasant. `rbfenet gui` serves a local page:
+move a knob, see the network and its metrics, pin the run, move another, compare.
+
+```bash
+rbfenet gui --ligands ligands.sdf --cache-dir ~/.cache/rbfenet
+```
+
+Standard library only — there is nothing extra to install.
+
+Every control is generated from the CLI's own argument parser, so the GUI holds no list of
+knobs of its own. A flag added to `rbfenet plan` shows up in the form for free, every
+refusal you see is the CLI's own message, and the page always shows the command that
+produced what you are looking at:
+
+```
+rbfenet plan --ligands ligands.sdf --planner redundant-mst --n-redundancy 3 --cbfe bridge
+```
+
+Copy that into a job script and you get the network on the screen. Exploring interactively
+and running reproducibly stay the same activity.
+
+Three things it can tell you that a command line cannot. Knobs the chosen planner will
+silently ignore are greyed out — `star` and `complete` accept a dozen network flags and
+never read them, and only `--design` and `--cbfe` are refused out loud. Knobs that cannot
+move an edge at all, like `--design-total-ns`, are labelled as export-only. And peak
+mapping memory is estimated from `--mcs-timeout` and `--jobs` as you type, since the
+defaults are already some 20 GB.
+
+A second run is fast because atom correspondences are cached, and `--cache-dir` keeps them
+across sessions. Mapping is where a plan spends its time and is the one stage that does not
+depend on the planner, so moving a selection knob re-runs only the repair and the scorer.
+
+The server binds loopback. To use it against ligands on a cluster, forward the port:
+
+```bash
+ssh -L 8765:127.0.0.1:8765 user@cluster
+rbfenet gui --ligands /scratch/ligands.sdf --no-browser
+```
+
 ## Python API
 
 ```python

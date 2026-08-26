@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rbfenet &mdash; network knobs</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header>
+  <h1>rbfenet <span class="sub">network knobs</span></h1>
+  <div class="ligands">
+    <label for="ligand-path">Ligands</label>
+    <input id="ligand-path" type="text" placeholder="path to an SDF, mol2, .smi, or a directory">
+    <button id="load">Load</button>
+    <span id="ligand-summary" class="muted"></span>
+  </div>
+</header>
+
+<main>
+  <aside id="knobs">
+    <div class="actions">
+      <button id="plan" class="primary">Plan</button>
+      <button id="cancel" disabled>Cancel</button>
+      <button id="reset">Reset knobs</button>
+    </div>
+    <div id="warnings"></div>
+    <div id="form"></div>
+  </aside>
+
+  <section id="result">
+    <div id="status" class="status"></div>
+    <div id="metrics" class="metrics"></div>
+    <div id="diagram" class="diagram"></div>
+    <div id="command-block" class="command-block" hidden>
+      <div class="command-head">
+        <span>The command that produced this</span>
+        <span>
+          <button id="copy">Copy</button>
+          <button id="pin">Pin this run</button>
+          <a id="report" target="_blank" rel="noopener">Full report</a>
+          <a id="download" download="network.json">network.json</a>
+        </span>
+      </div>
+      <pre id="command"></pre>
+    </div>
+    <div id="pins"></div>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

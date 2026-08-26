@@ -1,0 +1,378 @@
+"use strict";
+/* The knob explorer.
+ *
+ * Every control on this page is built from /api/schema, which is generated from the CLI's
+ * own argument parser. Nothing here knows the name of a single knob, and that is on
+ * purpose: a flag added to `rbfenet plan` shows up in this form without anyone editing
+ * this file, and the command line the page offers to copy is exactly the run it displays.
+ */
+
+const el = (tag, attrs = {}, ...kids) => {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") node.className = v;
+    else if (k === "text") node.textContent = v;
+    else if (v === true) node.setAttribute(k, "");
+    else if (v !== false && v != null) node.setAttribute(k, v);
+  }
+  for (const kid of kids) if (kid != null) node.append(kid);
+  return node;
+};
+
+const api = async (path, options) => {
+  const response = await fetch(path, options);
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || response.statusText);
+  return payload;
+};
+const post = (path, body) =>
+  api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+
+const state = { schema: null, values: {}, run: null, poll: null, fields: new Map() };
+
+/* ---------------------------------------------------------------- the form */
+
+/* Promoted to the top because they are the knobs that change the shape of the network
+ * rather than the feasibility of an edge. Purely an ordering hint: every one of them is
+ * still in its own group below, and nothing depends on this list being complete. */
+const COMMON = [
+  "planner", "edges_per_ligand", "min_cycle_coverage", "max_diameter",
+  "cbfe", "max_softcore_atoms", "design", "cluster_by",
+];
+
+function control(field) {
+  const current = state.values[field.dest];
+  const value = current === undefined ? field.default : current;
+  const set = (v) => {
+    if (v === "" || v === null) delete state.values[field.dest];
+    else state.values[field.dest] = v;
+    refreshForm();
+  };
+
+  if (field.widget === "bool") {
+    const box = el("input", { type: "checkbox" });
+    box.checked = Boolean(value);
+    box.onchange = () => set(box.checked ? true : null);
+    return box;
+  }
+  if (field.widget === "choice" || field.widget === "plugin") {
+    const select = el("select");
+    if (field.optional) select.append(el("option", { value: "", text: "(unset)" }));
+    const names = field.widget === "plugin"
+      ? state.schema.plugins[field.plugin_kind].map((p) => [p.name, p.available])
+      : field.choices.map((c) => [c, true]);
+    for (const [name, available] of names) {
+      const option = el("option", { value: name, text: available ? name : `${name} (not installed)` });
+      if (!available) option.disabled = true;
+      select.append(option);
+    }
+    select.value = value == null ? "" : String(value);
+    select.onchange = () => set(select.value);
+    return select;
+  }
+  if (field.widget === "repeatable") {
+    const list = Array.isArray(value) ? value : [];
+    const box = el("input", { type: "text", value: list.join(" "), placeholder: field.metavar || "" });
+    box.onchange = () => {
+      const parts = box.value.split(/\s+/).filter(Boolean);
+      set(parts.length ? parts : null);
+    };
+    return box;
+  }
+  const box = el("input", {
+    type: field.widget === "int" || field.widget === "float" ? "number" : "text",
+    value: value == null ? "" : String(value),
+    placeholder: field.optional ? "(unset)" : "",
+  });
+  if (field.widget === "float") box.step = "any";
+  box.onchange = () => {
+    if (box.value === "") return set(null);
+    set(field.widget === "int" ? parseInt(box.value, 10) : field.widget === "float" ? parseFloat(box.value) : box.value);
+  };
+  return box;
+}
+
+function fieldNode(field) {
+  const node = el("div", { class: "field" });
+  const label = el("label", { text: field.flag });
+  const row = el("div", { class: "row" }, control(field));
+  if (state.schema.export_knobs.includes(field.dest)) {
+    row.append(el("span", { class: "badge export", text: "export only", title:
+      "Read by the Amber exporter when writing runconfigs. It cannot move an edge, so the network above will not change." }));
+  }
+  node.append(label, row, el("div", { class: "help", text: field.help }));
+  state.fields.set(field.dest, node);
+  return node;
+}
+
+function buildForm() {
+  const form = document.getElementById("form");
+  form.replaceChildren();
+  state.fields.clear();
+
+  const byDest = new Map();
+  for (const group of state.schema.groups) for (const field of group.fields) byDest.set(field.dest, field);
+
+  const common = el("details", { class: "group", open: true }, el("summary", { text: "common" }));
+  const commonBody = el("div", { class: "group-body" });
+  for (const dest of COMMON) if (byDest.has(dest)) commonBody.append(fieldNode(byDest.get(dest)));
+  common.append(commonBody);
+  form.append(common);
+
+  for (const group of state.schema.groups) {
+    const details = el("details", { class: "group" }, el("summary", { text: group.title }));
+    const body = el("div", { class: "group-body" });
+    for (const field of group.fields) body.append(fieldNode(field));
+    details.append(body);
+    form.append(details);
+  }
+  refreshForm();
+}
+
+/* Recomputed on every change, because which knobs matter depends on the planner chosen. */
+function refreshForm() {
+  const schema = state.schema;
+  const planner = state.values.planner || "mst";
+  const known = schema.planner_knobs[planner];
+  const active = known ? new Set([...known, ...schema.pipeline_knobs, ...schema.export_knobs]) : null;
+
+  const byDest = new Map();
+  for (const group of schema.groups) for (const field of group.fields) byDest.set(field.dest, field);
+
+  for (const [dest, node] of state.fields) {
+    const field = byDest.get(dest);
+    const value = state.values[dest];
+    const changed = value !== undefined && JSON.stringify(value) !== JSON.stringify(field.default);
+    node.classList.toggle("changed", changed);
+
+    const inactive = active !== null && !active.has(dest);
+    node.classList.toggle("inactive", inactive);
+    let badge = node.querySelector(".badge.inactive-badge");
+    if (inactive && !badge) {
+      node.querySelector(".row").append(el("span", {
+        class: "badge inactive-badge",
+        text: `ignored by ${planner}`,
+        title: `The ${planner} planner never reads this knob. It is accepted and has no effect.`,
+      }));
+    } else if (!inactive && badge) {
+      badge.remove();
+    } else if (inactive && badge) {
+      badge.textContent = `ignored by ${planner}`;
+    }
+  }
+  renderWarnings();
+}
+
+/* ------------------------------------------------------------- the warnings */
+
+function renderWarnings() {
+  const box = document.getElementById("warnings");
+  const notes = [];
+  const v = state.values;
+  const n = state.nLigands || 0;
+
+  /* Peak memory during mapping, from the relation --jobs' own help text states: roughly
+   * 40 MB per second of --mcs-timeout per job, because FindMCS allocates monotonically
+   * and frees nothing until it returns. The default 60 s x 8 jobs is some 20 GB, which is
+   * how a 47-ligand run once reached 30 GB RSS and exhausted swap. */
+  const jobs = v.jobs ?? 1;
+  const timeout = v.mcs_timeout ?? 60;
+  const gb = (40 * timeout * jobs) / 1024;
+  if (gb >= 8) {
+    notes.push(el("div", { class: gb >= 24 ? "warn bad" : "warn" },
+      `Mapping may need about ${gb.toFixed(0)} GB at peak: roughly 40 MB per second of `,
+      el("code", { text: "--mcs-timeout" }), ` per job, and you have ${timeout} s x ${jobs} jobs. `,
+      `Lower either if that is more than this machine has.`));
+  }
+
+  if (n >= 40 && (v.prefilter ?? "none") === "none" && (v.pair_evaluation ?? "eager") === "eager") {
+    const pairs = (n * (n - 1)) / 2;
+    const note = el("div", { class: "warn" },
+      `${n} ligands is ${pairs} pairs to map. `,
+      el("button", { id: "large-preset" }, "Set --prefilter fingerprint and --pair-evaluation adaptive"),
+      " ");
+    notes.push(note);
+  }
+
+  if ((v.pair_evaluation ?? "eager") === "adaptive" && (v.planner ?? "mst") !== "mst") {
+    notes.push(el("div", { class: "warn" },
+      el("code", { text: "--pair-evaluation adaptive" }),
+      ` is honoured only by the mst planner. Under ${v.planner} it falls back to eager and maps the whole pool.`));
+  }
+
+  if (v.compat) {
+    notes.push(el("div", { class: "warn" },
+      el("code", { text: `--compat ${v.compat}` }),
+      " pins every algorithmic knob. Setting any of them alongside it is refused, not merged."));
+  }
+
+  box.replaceChildren(...notes);
+  const preset = document.getElementById("large-preset");
+  if (preset) {
+    preset.onclick = () => {
+      /* Set them visibly in the form rather than defaulting them behind the user's back:
+       * the copied command line has to be the command that produced the picture. */
+      state.values.prefilter = "fingerprint";
+      state.values.pair_evaluation = "adaptive";
+      buildForm();
+    };
+  }
+}
+
+/* --------------------------------------------------------------- the result */
+
+const STATS = [
+  ["n_edges", "Edges"], ["n_ligands", "Ligands"], ["cost", "Cost", 2], ["gpu_hours", "GPU-h", 0],
+  ["n_cycles", "Cycles ≤4"], ["diameter", "Diameter"],
+];
+
+function renderRun(run) {
+  const status = document.getElementById("status");
+  status.className = `status ${run.state}`;
+  if (run.state === "running") {
+    const { done, total } = run.progress;
+    const bar = el("progress", { value: done, max: Math.max(total, 1) });
+    status.replaceChildren(el("div", { text: `Mapping ${done} / ${total} pairs…` }), bar);
+  } else if (run.state === "error") {
+    status.replaceChildren(el("strong", { text: "Cannot plan that. " }), document.createTextNode(run.error));
+  } else if (run.state === "cancelled") {
+    status.replaceChildren(document.createTextNode("Cancelled."));
+  } else {
+    const cache = run.cache;
+    status.replaceChildren(document.createTextNode(
+      `Planned in ${run.seconds.toFixed(1)} s. ${cache.hits} mapping(s) reused, ${cache.misses} computed.`));
+  }
+
+  document.getElementById("cancel").disabled = run.state !== "running";
+
+  const metrics = document.getElementById("metrics");
+  if (run.metrics) {
+    metrics.replaceChildren(...STATS.map(([key, label, digits]) => {
+      const raw = run.metrics[key];
+      const text = raw == null ? "—" : digits == null ? String(raw) : Number(raw).toFixed(digits);
+      return el("div", { class: "stat" }, el("div", { class: "value", text }), el("div", { class: "label", text: label }));
+    }));
+  } else {
+    metrics.replaceChildren();
+  }
+
+  if (run.svg) document.getElementById("diagram").innerHTML = run.svg;
+
+  const block = document.getElementById("command-block");
+  block.hidden = run.state !== "done";
+  if (run.state === "done") {
+    document.getElementById("command").textContent = run.command;
+    document.getElementById("report").href = `/api/run/${run.id}/report`;
+    document.getElementById("download").href = `/api/run/${run.id}/network.json`;
+  }
+
+  if (run.unmet && run.unmet.length) {
+    const warn = el("div", { class: "warn" }, el("strong", { text: "Unmet constraints: " }),
+      document.createTextNode(run.unmet.join("; ")));
+    document.getElementById("warnings").append(warn);
+  }
+}
+
+const PIN_COLUMNS = [
+  ["n_edges", "edges"], ["cost", "cost", 2], ["gpu_hours", "GPU-h", 0],
+  ["diameter", "diam"], ["n_cycles", "cycles"],
+];
+
+function renderPins(pins) {
+  const box = document.getElementById("pins");
+  if (!pins.length) return box.replaceChildren();
+  const head = el("tr", {}, el("th", { text: "run" }),
+    ...PIN_COLUMNS.map(([, label]) => el("th", { text: label })),
+    el("th", { text: "deg min/mean/max" }), el("th", { text: "flags" }), el("th", {}));
+  const rows = pins.map((pin) => {
+    const m = pin.metrics;
+    const cells = PIN_COLUMNS.map(([key, , digits]) => {
+      const raw = m[key];
+      return el("td", { text: raw == null ? "—" : digits == null ? String(raw) : Number(raw).toFixed(digits) });
+    });
+    const drop = el("button", { text: "×", title: "Remove this pin" });
+    drop.onclick = async () => renderPins((await post("/api/unpin", { run_id: pin.run_id })).pins);
+    return el("tr", {},
+      el("td", { text: pin.label }), ...cells,
+      el("td", { text: `${m.degree.min}/${m.degree.mean.toFixed(1)}/${m.degree.max}` }),
+      el("td", { title: pin.command, text: pin.argv.slice(3).join(" ") || "(defaults)" }),
+      el("td", {}, drop));
+  });
+  box.replaceChildren(el("h2", { text: "Pinned runs" }),
+    el("table", {}, el("thead", {}, head), el("tbody", {}, ...rows)));
+}
+
+/* ------------------------------------------------------------------ driving */
+
+function poll(runId) {
+  clearInterval(state.poll);
+  state.poll = setInterval(async () => {
+    try {
+      const run = await api(`/api/run/${runId}`);
+      state.run = run;
+      renderRun(run);
+      if (run.state !== "running") clearInterval(state.poll);
+    } catch (err) {
+      clearInterval(state.poll);
+    }
+  }, 250);
+}
+
+async function plan() {
+  try {
+    const run = await post("/api/plan", { values: state.values });
+    state.run = run;
+    renderRun(run);
+    poll(run.id);
+  } catch (err) {
+    const status = document.getElementById("status");
+    status.className = "status error";
+    status.replaceChildren(el("strong", { text: "Cannot plan that. " }), document.createTextNode(err.message));
+  }
+}
+
+async function loadLigands() {
+  const path = document.getElementById("ligand-path").value.trim();
+  const summary = document.getElementById("ligand-summary");
+  if (!path) return;
+  summary.textContent = "loading…";
+  try {
+    const info = await post("/api/ligands", { paths: [path] });
+    state.nLigands = info.n_ligands;
+    summary.textContent = `${info.n_ligands} ligands: ${info.names.slice(0, 6).join(", ")}${info.names.length > 6 ? "…" : ""}`;
+    refreshForm();
+  } catch (err) {
+    summary.textContent = err.message;
+  }
+}
+
+async function main() {
+  state.schema = await api("/api/schema");
+  buildForm();
+
+  document.getElementById("load").onclick = loadLigands;
+  document.getElementById("ligand-path").onkeydown = (e) => { if (e.key === "Enter") loadLigands(); };
+  document.getElementById("plan").onclick = plan;
+  document.getElementById("cancel").onclick = () => state.run && post(`/api/run/${state.run.id}/cancel`);
+  document.getElementById("reset").onclick = () => { state.values = {}; buildForm(); };
+  document.getElementById("copy").onclick = () =>
+    navigator.clipboard.writeText(document.getElementById("command").textContent);
+  document.getElementById("pin").onclick = async () => {
+    if (!state.run || state.run.state !== "done") return;
+    const label = prompt("Label for this pin", `run ${state.run.id.slice(0, 4)}`);
+    if (label === null) return;
+    await post("/api/pin", { run_id: state.run.id, label });
+    renderPins((await api("/api/session")).pins);
+  };
+
+  const session = await api("/api/session");
+  if (session.ligands.paths.length) {
+    document.getElementById("ligand-path").value = session.ligands.paths[0];
+    state.nLigands = session.ligands.loaded.length;
+    document.getElementById("ligand-summary").textContent = `${state.nLigands} ligands loaded`;
+  }
+  renderPins(session.pins);
+  refreshForm();
+}
+
+main();

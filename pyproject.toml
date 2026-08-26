@@ -66,6 +66,11 @@ all = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The GUI's page. Real files rather than Python string constants, so an editor and
+# the linters see them for what they are -- and the only non-.py content that ships.
+[tool.setuptools.package-data]
+"rbfenetmap.gui" = ["static/*"]
+
 [tool.ruff]
 line-length = 120
 indent-width = 4

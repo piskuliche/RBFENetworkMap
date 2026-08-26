@@ -22,6 +22,7 @@ from rbfenetmap.cli._args import (
     add_ligand_arguments,
     add_mapping_arguments,
     add_network_arguments,
+    add_scorer_arguments,
     add_softcore_arguments,
     explicit_dests,
     resolve_compat,
@@ -29,14 +30,6 @@ from rbfenetmap.cli._args import (
 from rbfenetmap.core.exceptions import RBFENetworkMapError
 
 __all__ = ("build_parser", "dispatch", "main")
-
-
-def _add_scorer_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add the scorer-selection flags."""
-    group = parser.add_argument_group("scoring")
-    group.add_argument("--scorer", default="linear", help="Scorer plugin (default: %(default)s).")
-    group.add_argument("--weights", action="append", metavar="K=V", help="Override a scoring weight, repeatable.")
-    group.add_argument("--weights-file", type=Path, metavar="PATH", help="JSON file of scoring weights.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan = subparsers.add_parser("plan", help="Map, score, and select a network.")
     add_ligand_arguments(plan)
     add_mapping_arguments(plan)
-    _add_scorer_arguments(plan)
+    add_scorer_arguments(plan)
     add_softcore_arguments(plan)
     add_network_arguments(plan)
     plan.add_argument("--out", type=Path, default=Path("network.json"), help="Network JSON output path.")
@@ -73,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     score = subparsers.add_parser("score", help="Score candidate edges without selecting a network.")
     add_ligand_arguments(score)
     add_mapping_arguments(score)
-    _add_scorer_arguments(score)
+    add_scorer_arguments(score)
     add_softcore_arguments(score)
     add_network_arguments(score)
     score.add_argument("--top", type=int, metavar="N", help="Show only the N best candidates.")
@@ -85,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     mapping = subparsers.add_parser("map", help="Compute mappings for specific pairs.")
     add_ligand_arguments(mapping)
     add_mapping_arguments(mapping)
-    _add_scorer_arguments(mapping)
+    add_scorer_arguments(mapping)
     add_softcore_arguments(mapping)
     add_network_arguments(mapping)
     mapping.add_argument("--pair", action="append", metavar="A~B", help="Pair to map, repeatable.")

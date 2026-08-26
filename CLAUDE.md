@@ -23,6 +23,7 @@ sphinx-build -W -b html docs/source docs/build/html
 | `core/meta/` | The five plugin ABCs, importable with no optional dependency present. |
 | `plugins/{mappers,scorers,planners,exporters,intermediates}/` | Implementations plus their `PluginSpec` tables. |
 | `io/`, `viz/`, `cli/` | Loaders and network JSON, depictions, argparse. |
+| `gui/` | Optional local browser GUI. Stdlib only; derives its form from `cli/`. |
 | `tests/conftest.py` | `Dummy*` plugins and the co-posed ligand factories — read it before writing a test. |
 
 ## Gotchas
@@ -67,6 +68,15 @@ amberstudio needs a topology for each; the user has never seen the synthetic one
 Amber exporter writes `ligands/<name>.sdf` for every ligand plus an `intermediates.txt`
 manifest. If you touch that exporter, keep the invariant — every name in `edges.dat` has a
 file in `ligands/` — and the test that asserts it.
+
+**The GUI has no option list of its own, and must not grow one.** `gui/schema.py`
+derives every form field by walking the CLI's own argument groups, and the filled form is
+serialized back to flags that `cli/_args.build_network_options` parses -- so a knob added to
+the CLI appears in the GUI for free, and the GUI can always print the exact `rbfenet plan`
+line that produced what it is showing. `tests/test_gui_schema.py` asserts set equality
+between the parser's destinations and the schema's, so a new flag fails the suite until it
+is classified as a knob, as output plumbing, or in `KNOB_EXCLUSIONS` *with a reason*.
+Adding a hand-maintained field there would silently defeat all of it.
 
 **`examples/data/benzamides.sdf` is gitignored**; regenerate it with
 `python examples/data/make_conformers.py`.

@@ -9,3 +9,4 @@ API reference
    io
    viz
    cli
+   gui

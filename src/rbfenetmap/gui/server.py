@@ -64,7 +64,15 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _json(self, payload: Any, status: int = 200) -> None:
-        self._send(status, json.dumps(payload).encode(), "application/json")
+        """Send *payload* as JSON, refusing anything a browser could not parse.
+
+        ``allow_nan=False`` is the point. Python renders ``math.inf`` as the bare token
+        ``Infinity``, which ``json.dumps`` emits happily and ``JSON.parse`` rejects
+        outright -- and an infinite cost is not exotic here, it is what every infeasible
+        candidate carries. Without this the page fails with a console error and the server
+        logs nothing at all. With it, the same mistake is a loud 500 naming the value.
+        """
+        self._send(status, json.dumps(payload, allow_nan=False).encode(), "application/json")
 
     def _error(self, exc: Exception, status: int = 400) -> None:
         """Return a failure as a readable message.

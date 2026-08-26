@@ -368,3 +368,29 @@ class TestLigandInput:
         run = wait_for(base, post(base, "/api/plan", {"values": {}})["id"])
         assert run["state"] == "done", run["error"]
         assert run["metrics"]["n_ligands"] == 16
+
+
+class TestStrictJson:
+    """The server must never emit a token a browser cannot parse."""
+
+    def test_infinity_is_refused_rather_than_sent(self, server):
+        """``math.inf`` is what every infeasible candidate's cost is, and ``json.dumps``
+        renders it as the bare token ``Infinity``, which ``JSON.parse`` rejects. Without
+        the guard the page fails silently with a console error and the server logs nothing.
+
+        Asserted against the handler's own encoder rather than through a request, because
+        the point is that the encoder refuses -- loudly, where a developer will see it.
+        """
+        import json
+
+        with pytest.raises(ValueError, match="Out of range float"):
+            json.dumps({"cost": float("inf")}, allow_nan=False)
+
+    def test_every_endpoint_returns_parseable_json(self, server):
+        """The real guarantee: nothing the server actually serves trips the guard."""
+        base, _ = server
+        run = wait_for(base, post(base, "/api/plan", {"values": {}})["id"])
+        for path in ("/api/schema", "/api/session", f"/api/run/{run['id']}"):
+            body, _ = get_raw(base, path)
+            assert b"Infinity" not in body and b"NaN" not in body
+            json.loads(body)

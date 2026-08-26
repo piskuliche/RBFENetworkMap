@@ -43,6 +43,8 @@ Pipeline
 Diagnostics and cost
 --------------------
 
+.. automodule:: rbfenetmap.core.inspect
+
 .. automodule:: rbfenetmap.core.diagnostics
 
 .. automodule:: rbfenetmap.core.cost

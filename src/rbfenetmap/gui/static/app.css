@@ -1,0 +1,123 @@
+/* Deliberately close to viz/gallery.py's palette: the diagram shown here is the same SVG
+   the report embeds, and two different surrounds for one picture read as two pictures. */
+:root {
+  --bg: #f7f8fa;
+  --panel: #fff;
+  --ink: #1c2733;
+  --muted: #64748b;
+  --line: #dbe2ea;
+  --accent: #4a90d9;
+  --accent-dark: #22384f;
+  --warn: #f58c52;
+  --bad: #c0392b;
+  --good: #0f766e;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+}
+header {
+  padding: .8rem 1.2rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem 2rem;
+  align-items: center;
+}
+h1 { font-size: 1.1rem; margin: 0; font-weight: 600; }
+h1 .sub { color: var(--muted); font-weight: 400; }
+.ligands { display: flex; gap: .5rem; align-items: center; flex: 1 1 30rem; }
+.ligands input { flex: 1; min-width: 12rem; }
+.muted { color: var(--muted); }
+
+main { display: flex; align-items: flex-start; gap: 1rem; padding: 1rem; }
+#knobs { flex: 0 0 22rem; max-height: calc(100vh - 6rem); overflow-y: auto; }
+#result { flex: 1; min-width: 0; }
+
+.actions { display: flex; gap: .4rem; margin-bottom: .6rem; position: sticky; top: 0; }
+button, .actions a {
+  font: inherit;
+  padding: .35rem .7rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent-dark); color: #fff; }
+input, select { font: inherit; padding: .25rem .4rem; border: 1px solid var(--line); border-radius: 4px; background: #fff; }
+input[type=number] { width: 6.5rem; }
+
+details.group {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  margin-bottom: .5rem;
+}
+details.group > summary { padding: .5rem .7rem; cursor: pointer; font-weight: 600; }
+details.group > summary::marker { color: var(--muted); }
+.group-body { padding: 0 .7rem .6rem; }
+
+.field { padding: .35rem 0; border-top: 1px solid var(--line); }
+.field:first-child { border-top: 0; }
+.field label { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; }
+.field .row { display: flex; gap: .4rem; align-items: center; margin-top: .2rem; }
+.field .help { color: var(--muted); font-size: .78rem; margin-top: .15rem; }
+.field.changed label { color: var(--accent-dark); font-weight: 700; }
+.field.changed { background: #f0f6fd; margin: 0 -.7rem; padding: .35rem .7rem; }
+/* Inactive rather than hidden: the knob still exists, and a user who set it deserves to
+   see that this planner will not read it, not to watch it silently vanish. */
+.field.inactive { opacity: .45; }
+.field .badge {
+  font-size: .68rem;
+  padding: 0 .3rem;
+  border-radius: 3px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.field .badge.export { border-color: var(--good); color: var(--good); }
+
+.status { padding: .5rem .8rem; border-radius: 6px; background: var(--panel); border: 1px solid var(--line); }
+.status.running { border-color: var(--accent); }
+.status.error { border-color: var(--bad); color: var(--bad); white-space: pre-wrap; }
+.status.cancelled { border-color: var(--warn); }
+progress { width: 100%; height: .5rem; }
+
+.metrics { display: flex; flex-wrap: wrap; gap: .5rem; margin: .6rem 0; }
+.stat { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: .4rem .7rem; min-width: 5.5rem; }
+.stat .value { font-size: 1.15rem; font-weight: 600; }
+.stat .label { color: var(--muted); font-size: .75rem; }
+
+.diagram { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; overflow-x: auto; }
+.diagram svg { display: block; max-width: 100%; height: auto; }
+
+.command-block { margin: .6rem 0; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+.command-head {
+  display: flex; justify-content: space-between; align-items: center; gap: .5rem;
+  padding: .4rem .7rem; border-bottom: 1px solid var(--line); color: var(--muted); font-size: .8rem;
+}
+.command-head a { text-decoration: none; }
+#command { margin: 0; padding: .6rem .7rem; overflow-x: auto; font-size: .82rem; }
+
+table { border-collapse: collapse; width: 100%; background: var(--panel); font-size: .85rem; }
+th, td { padding: .3rem .5rem; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+thead th { color: var(--muted); font-weight: 600; }
+
+.warn {
+  background: #fff6ef; border: 1px solid var(--warn); border-radius: 6px;
+  padding: .45rem .6rem; margin-bottom: .5rem; font-size: .82rem;
+}
+.warn.bad { background: #fdf0ee; border-color: var(--bad); }
+.warn code { background: #0001; padding: 0 .2rem; border-radius: 3px; }
+
+@media (max-width: 60rem) {
+  main { flex-direction: column; }
+  #knobs { flex: 1 1 auto; width: 100%; max-height: none; }
+}

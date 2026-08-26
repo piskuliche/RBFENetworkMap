@@ -17,7 +17,7 @@ from typing import Sequence
 
 from rbfenetmap.cli._args import build_alignment_options, build_mapping_options, build_network_options, parse_key_values
 from rbfenetmap.core.cost import network_cost_summary
-from rbfenetmap.core.diagnostics import edge_budget_advice, summarize
+from rbfenetmap.core.diagnostics import edge_budget_advice, summarize, summarize_json
 from rbfenetmap.core.exceptions import NetworkPlanError, RBFENetworkMapError
 from rbfenetmap.core.models import (
     EDGE_SEPARATOR,
@@ -243,6 +243,21 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
     from rbfenetmap.io.networkio import load_network
 
     network = load_network(Path(args.network))
+    if args.format == "json":
+        print(
+            json.dumps(
+                summarize_json(
+                    network,
+                    seed=args.seed,
+                    failure_rate=args.failure_rate,
+                    n_repeats=args.repeats,
+                    max_cycle_length=args.max_cycle_length,
+                ),
+                indent=2,
+            )
+        )
+        return 0
+
     report = summarize(
         network,
         seed=args.seed,
@@ -251,47 +266,6 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
         max_cycle_length=args.max_cycle_length,
     )
     degrees, robustness, budget = report["degrees"], report["robustness"], report["budget"]
-    totals = network_cost_summary(network)
-
-    if args.format == "json":
-        print(
-            json.dumps(
-                {
-                    "n_ligands": report["n_ligands"],
-                    "n_edges": report["n_edges"],
-                    "n_rbfe": report["n_rbfe"],
-                    "n_cbfe": report["n_cbfe"],
-                    "cost": report["cost"],
-                    "efficiency": report["efficiency"],
-                    "gpu_hours": totals["gpu_hours"],
-                    "price": totals["price"],
-                    "n_cycles": report["n_cycles"],
-                    "max_cycle_length": report["max_cycle_length"],
-                    "degree": {
-                        "min": degrees.minimum,
-                        "mean": degrees.mean,
-                        "max": degrees.maximum,
-                        "isolated": list(degrees.isolated),
-                        "per_ligand": degrees.degrees,
-                    },
-                    "diameter": report["diameter"],
-                    "robustness": {
-                        "connected_fraction": robustness.connected_fraction,
-                        "mean_ligands_retained": robustness.mean_ligands_retained,
-                        "failure_rate": robustness.failure_rate,
-                        "n_repeats": robustness.n_repeats,
-                        "seed": robustness.seed,
-                    },
-                    "edge_budget": {
-                        "recommended": budget.recommended,
-                        "shortfall": budget.shortfall,
-                        "message": budget.message,
-                    },
-                },
-                indent=2,
-            )
-        )
-        return 0
 
     rows = [
         ["ligands", str(report["n_ligands"])],
@@ -622,6 +596,27 @@ def cmd_plugins(args: argparse.Namespace) -> int:
         if rows:
             print(f"\n{kind}s")
             print(_format_table(rows, ["name", "status", "description"]))
+    return 0
+
+
+def cmd_gui(args: argparse.Namespace) -> int:
+    """Serve the local knob explorer until interrupted.
+
+    Notes
+    -----
+    The import is deferred so that the GUI's modules are not loaded by every other
+    command, and so this handler stays importable wherever the rest of the CLI is.
+    """
+    from rbfenetmap.gui.server import serve
+
+    serve(
+        args.ligands or None,
+        host=args.host,
+        port=args.port,
+        name_property=args.name_property,
+        cache_dir=args.cache_dir,
+        open_browser=not args.no_browser,
+    )
     return 0
 
 

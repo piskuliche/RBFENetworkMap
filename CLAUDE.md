@@ -78,6 +78,13 @@ between the parser's destinations and the schema's, so a new flag fails the suit
 is classified as a knob, as output plumbing, or in `KNOB_EXCLUSIONS` *with a reason*.
 Adding a hand-maintained field there would silently defeat all of it.
 
+**`viz/` output stays script-free; `gui/` is where scripts live.** The report is an
+artifact somebody emails or attaches to a ticket, which is why `gallery.py` inlines
+everything and does its before/after toggle with a hidden checkbox and sibling selectors
+rather than a line of JS. The GUI is an application and does use JS, in
+`gui/static/app.js`. Do not carry either convention into the other: a script in the report
+breaks the thing it is for, and a CSS-only GUI would be a worse tool for no gain.
+
 **`examples/data/benzamides.sdf` is gitignored**; regenerate it with
 `python examples/data/make_conformers.py`.
 

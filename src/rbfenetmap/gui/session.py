@@ -16,6 +16,7 @@ while still printing it in the command line it offers to copy.
 
 from __future__ import annotations
 
+import glob
 import logging
 import threading
 import time
@@ -30,7 +31,51 @@ from rbfenetmap.gui.schema import to_argv
 
 logger = logging.getLogger(__name__)
 
-__all__ = ("PlanRun", "PlanSession")
+__all__ = ("PlanRun", "PlanSession", "expand_ligand_paths")
+
+
+def expand_ligand_paths(paths: Sequence[str | Path]) -> list[Path]:
+    """Resolve ligand inputs the way a shell would before ``--ligands`` sees them.
+
+    Parameters
+    ----------
+    paths : Sequence[str or Path]
+        Files, directories, or glob patterns.
+
+    Returns
+    -------
+    list of Path
+        Sorted matches for each pattern, and every non-pattern passed through untouched.
+
+    Raises
+    ------
+    FileNotFoundError
+        If a pattern matches nothing. A pattern that silently contributes no ligands is
+        worse than one that fails: the run would go ahead over whatever else was listed
+        and quietly plan a network across the wrong set.
+
+    Notes
+    -----
+    ``rbfenet plan --ligands data/*.mol2`` works because the *shell* expands the pattern
+    into sixteen arguments before argparse ever runs. There is no shell behind a text box,
+    so without this a pasted pattern reaches
+    :func:`~rbfenetmap.io.loaders.load_ligands` verbatim and fails as a missing file.
+
+    Directories are left alone rather than expanded here. ``load_ligands`` already scans
+    them, non-recursively and by suffix, and duplicating that rule would be a second answer
+    to which files count as molecules.
+    """
+    resolved: list[Path] = []
+    for entry in paths:
+        text = str(entry)
+        if any(character in text for character in "*?["):
+            matches = sorted(glob.glob(text))  # noqa: PTH207 - Path.glob cannot take an absolute pattern
+            if not matches:
+                raise FileNotFoundError(f"No files match {text!r}.")
+            resolved.extend(Path(match) for match in matches)
+        else:
+            resolved.append(Path(text))
+    return resolved
 
 
 class PlanRun:
@@ -158,13 +203,20 @@ class PlanSession:
     def set_ligands(self, paths: Sequence[str | Path], *, name_property: str | None = None) -> dict[str, Any]:
         """Point the session at a new ligand set and load it immediately.
 
+        Parameters
+        ----------
+        paths : Sequence[str or Path]
+            Files, directories, or shell-style patterns, in any mixture -- the same
+            latitude ``--ligands`` has once a shell has been through it.
+        name_property : str, optional
+
         Returns
         -------
         dict
-            ``names``, ``n_ligands`` and the ``paths`` as given, so the browser can show
-            what it got rather than only that something happened.
+            ``names``, ``n_ligands`` and the ``paths`` as resolved -- resolved rather than
+            as given, so a pattern shows the browser which files it actually matched.
         """
-        self.ligand_paths = [Path(p) for p in paths]
+        self.ligand_paths = expand_ligand_paths(paths)
         if name_property is not None:
             self.name_property = name_property
         self._ligands = None

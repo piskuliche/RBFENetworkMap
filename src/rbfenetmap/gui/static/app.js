@@ -332,12 +332,15 @@ async function plan() {
 }
 
 async function loadLigands() {
-  const path = document.getElementById("ligand-path").value.trim();
+  const raw = document.getElementById("ligand-path").value.trim();
   const summary = document.getElementById("ligand-summary");
-  if (!path) return;
+  if (!raw) return;
+  /* Whitespace-separated, because --ligands is nargs="+" and this box should accept what
+   * that accepts. Globs are expanded server-side, where a shell would have done it. */
+  const paths = raw.split(/\s+/).filter(Boolean);
   summary.textContent = "loading…";
   try {
-    const info = await post("/api/ligands", { paths: [path] });
+    const info = await post("/api/ligands", { paths });
     state.nLigands = info.n_ligands;
     summary.textContent = `${info.n_ligands} ligands: ${info.names.slice(0, 6).join(", ")}${info.names.length > 6 ? "…" : ""}`;
     refreshForm();

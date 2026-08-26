@@ -25,6 +25,7 @@ from rbfenetmap.gui.session import PlanSession
 pytestmark = pytest.mark.integration
 
 GOLDEN_SDF = Path(__file__).resolve().parent / "data" / "golden_benzamides.sdf"
+TYK2_DIR = Path(__file__).resolve().parents[1] / "examples" / "data" / "tyk2"
 
 
 @pytest.fixture
@@ -309,3 +310,61 @@ class TestCancellation:
         second = post(base, "/api/plan", {"values": {"edges_per_ligand": 3}})
         wait_for(base, second["id"])
         assert session.runs[first["id"]].state in ("cancelled", "done")
+
+
+class TestLigandInput:
+    """Everything ``--ligands`` accepts, the box has to accept too.
+
+    `--ligands` is nargs="+" and the shell expands patterns before argparse sees them.
+    Neither is true of a text box, and their absence reads as "the GUI only takes SDF".
+    """
+
+    @pytest.fixture(autouse=True)
+    def _needs_amber_mol2(self):
+        """The tyk2 inputs are GAFF-typed; stock RDKit cannot read them."""
+        pytest.importorskip("rdk_amber")
+
+    def test_a_directory_is_scanned(self, server):
+        base, _ = server
+        info = post(base, "/api/ligands", {"paths": [str(TYK2_DIR)]})
+        assert info["n_ligands"] == 16
+
+    def test_several_paths_are_accepted(self, server):
+        base, _ = server
+        paths = [str(TYK2_DIR / name) for name in ("ejm31.mol2", "ejm42.mol2", "ejm43.mol2")]
+        assert post(base, "/api/ligands", {"paths": paths})["n_ligands"] == 3
+
+    def test_a_pattern_is_expanded(self, server):
+        """What the shell does for the CLI, done server-side for the page."""
+        base, _ = server
+        info = post(base, "/api/ligands", {"paths": [str(TYK2_DIR / "ejm4*.mol2")]})
+        assert info["n_ligands"] == len(list(TYK2_DIR.glob("ejm4*.mol2")))
+        assert all(name.startswith("ejm4") for name in info["names"])
+
+    def test_the_resolved_paths_come_back_not_the_pattern(self, server):
+        """So the browser can show which files a pattern actually matched."""
+        base, _ = server
+        info = post(base, "/api/ligands", {"paths": [str(TYK2_DIR / "ejm4*.mol2")]})
+        assert "*" not in " ".join(info["paths"])
+        assert len(info["paths"]) == len(list(TYK2_DIR.glob("ejm4*.mol2")))
+
+    def test_a_pattern_matching_nothing_is_refused(self, server):
+        """Not silently dropped: the run would then plan over whatever else was listed."""
+        base, _ = server
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            post(base, "/api/ligands", {"paths": [str(TYK2_DIR / "nosuch*.mol2")]})
+        assert "No files match" in json.loads(exc.value.read())["error"]
+
+    def test_a_mixture_of_forms_is_accepted(self, server):
+        """Files, a pattern and a directory together, as a command line would take them."""
+        base, _ = server
+        info = post(base, "/api/ligands", {"paths": [str(TYK2_DIR / "ejm31.mol2"), str(TYK2_DIR / "jmc2*.mol2")]})
+        assert info["n_ligands"] == 4
+
+    def test_a_planned_run_over_mol2_ligands(self, server):
+        """The formats are the loader's, but nothing had asserted the GUI reaches them."""
+        base, _ = server
+        post(base, "/api/ligands", {"paths": [str(TYK2_DIR)]})
+        run = wait_for(base, post(base, "/api/plan", {"values": {}})["id"])
+        assert run["state"] == "done", run["error"]
+        assert run["metrics"]["n_ligands"] == 16

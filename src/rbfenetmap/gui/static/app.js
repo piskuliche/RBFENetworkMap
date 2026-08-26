@@ -417,6 +417,15 @@ function renderDetail(data) {
   /* mapper_failed and no_common_core yield a wholly soft-core mapping, so both molecules
    * draw entirely warm. That is the rejection, not a drawing fault; the report carries the
    * same note, and without it this reads as a bug. */
+  /* When the repair itself gave up, the partition stored on the edge is where it stopped
+   * rather than a final answer -- so "common core 12" can sit beside a no_common_core
+   * rejection and read as a contradiction. The trace's last line says the same thing. */
+  if (data.repair_rejection) {
+    parts.push(el("div", { class: "detail-note warn-note", text:
+      `The soft-core repair gave up here (${data.repair_rejection}). These pictures show the ` +
+      "partition as it stood when it stopped, not one this edge could have run with." }));
+  }
+
   if (data.n_common_core === 0 && !data.counterpoised) {
     parts.push(el("div", { class: "detail-note warn-note", text:
       "No common core was found, so every atom is drawn as soft-core. " +
